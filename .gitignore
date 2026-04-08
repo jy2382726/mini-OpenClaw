@@ -186,6 +186,9 @@ backend/graph/*.json
 backend/graph/*.db
 backend/graph/*.sqlite
 
+# Storage (memory data)
+backend/storage/
+
 # ============================================
 # Misc
 # ============================================
