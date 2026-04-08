@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Summarizer"
+  short_description: "Create and review Document Summarizer skills"
+  default_prompt: "Use $document-summarizer to handle this repeated workflow as a reusable skill."

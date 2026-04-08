@@ -1,0 +1,161 @@
+{
+  "skill_name": "get-date",
+  "timestamp": 1774236514.333,
+  "total_score": 20,
+  "grade": "基础扎实",
+  "verdict_note": "建议补充 should-not-trigger 场景定义和自动化测试脚本以提升验证强度",
+  "dimensions": [
+    {
+      "name": "触发质量",
+      "score": 4,
+      "reason": "description 覆盖常见时间问法但缺少 should-not-trigger 场景",
+      "checks": [
+        {
+          "item": "description 覆盖常见时间问法",
+          "passed": true
+        },
+        {
+          "item": "明确边界说明（不猜测日期）",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "路由清晰度",
+      "score": 5,
+      "reason": "Decision Tree 清晰定义 8 种场景到命令的映射",
+      "checks": [
+        {
+          "item": "Decision Tree 覆盖主要场景",
+          "passed": true
+        },
+        {
+          "item": "Workflow 步骤清晰",
+          "passed": true
+        },
+        {
+          "item": "脚本调用路径明确",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "上下文效率",
+      "score": 4,
+      "reason": "SKILL.md 结构清晰但缺少 references/assets 目录",
+      "checks": [
+        {
+          "item": "SKILL.md 行数合理（153 行）",
+          "passed": true
+        },
+        {
+          "item": "Resources 分层清晰",
+          "passed": true
+        },
+        {
+          "item": "示例覆盖主要场景",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "复用与确定性",
+      "score": 4,
+      "reason": "核心功能脚本化且执行确定，但缺少配置化资源",
+      "checks": [
+        {
+          "item": "核心工作脚本化（2 个脚本）",
+          "passed": true
+        },
+        {
+          "item": "执行结果一致（系统时间）",
+          "passed": true
+        },
+        {
+          "item": "缺少 references/目录",
+          "passed": false
+        },
+        {
+          "item": "缺少 assets/目录",
+          "passed": false
+        }
+      ]
+    },
+    {
+      "name": "验证强度",
+      "score": 3,
+      "reason": "有成功标准和验证方法但缺少自动化测试",
+      "checks": [
+        {
+          "item": "有明确的成功标准列表",
+          "passed": true
+        },
+        {
+          "item": "有验证方法说明",
+          "passed": true
+        },
+        {
+          "item": "有示例覆盖不同场景",
+          "passed": true
+        },
+        {
+          "item": "缺少自动化测试脚本",
+          "passed": false
+        },
+        {
+          "item": "evals 结果为测试数据非真实评估",
+          "passed": false
+        }
+      ]
+    }
+  ],
+  "strengths": [
+    {
+      "dimension": "复用与确定性",
+      "text": "get_date_info.py 和 advanced_date.py 覆盖了所有时间获取场景，执行结果完全确定"
+    },
+    {
+      "dimension": "路由清晰度",
+      "text": "Decision Tree 以树形结构清晰展示 8 种用户请求类型的路由选择"
+    },
+    {
+      "dimension": "复用与确定性",
+      "text": "get_date_info.py 和 advanced_date.py 完全覆盖时间获取需求，结果可重复"
+    },
+    {
+      "dimension": "触发质量",
+      "text": "description 使用中英文混合覆盖多种问法，边界说明明确"
+    }
+  ],
+  "weaknesses": [
+    {
+      "dimension": "上下文效率",
+      "text": "缺少 references/目录存储评分规则、场景设计规则等可复用知识"
+    },
+    {
+      "dimension": "复用与确定性",
+      "text": "缺少 assets/目录存储 benchmark prompts 模板"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "evals/five-dim-result.json 是测试占位数据，非真实评估结果"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "缺少 scripts/test_*.py 或 scripts/validate_*.py 自动化验证脚本"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "缺少自动化测试脚本，evals 目录仅有测试占位数据"
+    },
+    {
+      "dimension": "上下文效率",
+      "text": "未使用 references/目录存储可复用知识（如评分规则、场景设计规则）"
+    },
+    {
+      "dimension": "触发质量",
+      "text": "未明确定义 should-not-trigger 场景（如非时间相关问题）"
+    }
+  ],
+  "session_id": "eval-get-date-1774236473399"
+}

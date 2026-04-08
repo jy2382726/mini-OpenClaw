@@ -1,0 +1,137 @@
+{
+  "skill_name": "get-date",
+  "timestamp": 1774238735.199,
+  "total_score": 21,
+  "grade": "基础扎实",
+  "verdict_note": "修复测试脚本路径 bug 后可达到生产级，建议补充不支持场景的边界说明",
+  "dimensions": [
+    {
+      "name": "触发质量",
+      "score": 4,
+      "reason": "description 清晰定义触发场景和边界，中英文覆盖完整",
+      "checks": [
+        {
+          "item": "description 明确列出触发请求类型",
+          "passed": true
+        },
+        {
+          "item": "有边界声明（禁止猜测日期）",
+          "passed": true
+        },
+        {
+          "item": "覆盖中英文触发词",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "路由清晰度",
+      "score": 5,
+      "reason": "Decision Tree 树状结构清晰，每个请求类型都有明确路由",
+      "checks": [
+        {
+          "item": "有 Decision Tree 决策树",
+          "passed": true
+        },
+        {
+          "item": "Workflow 分步骤说明",
+          "passed": true
+        },
+        {
+          "item": "每个分支有对应的脚本命令",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "上下文效率",
+      "score": 4,
+      "reason": "153 行精简，分层结构合理，渐进披露做得好",
+      "checks": [
+        {
+          "item": "SKILL.md 行数<200",
+          "passed": true
+        },
+        {
+          "item": "有清晰的分层结构",
+          "passed": true
+        },
+        {
+          "item": "详细信息放在 Resources 章节",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "复用与确定性",
+      "score": 4,
+      "reason": "两个核心脚本 + 测试脚本，但测试有路径 bug",
+      "checks": [
+        {
+          "item": "核心功能脚本化",
+          "passed": true
+        },
+        {
+          "item": "有测试脚本覆盖",
+          "passed": true
+        },
+        {
+          "item": "测试脚本可正常运行",
+          "passed": false
+        }
+      ]
+    },
+    {
+      "name": "验证强度",
+      "score": 4,
+      "reason": "明确的成功标准和验证方法，有自动化测试覆盖",
+      "checks": [
+        {
+          "item": "有 Validation 章节",
+          "passed": true
+        },
+        {
+          "item": "有明确的成功标准列表",
+          "passed": true
+        },
+        {
+          "item": "有验证方法说明",
+          "passed": true
+        },
+        {
+          "item": "有多个示例覆盖不同场景",
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "strengths": [
+    {
+      "dimension": "路由清晰度",
+      "text": "Decision Tree 用树状 ASCII 图展示，直观清晰，agent 一眼就能确定该执行哪个命令"
+    },
+    {
+      "dimension": "复用与确定性",
+      "text": "两个 Python 脚本覆盖了所有日期时间需求，脚本内部逻辑完善，支持中文星期输出"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "Validation 章节有 5 条可检查的成功标准，并提供了具体的验证命令"
+    }
+  ],
+  "weaknesses": [
+    {
+      "dimension": "复用与确定性",
+      "text": "test_get_date.py 存在路径 bug，引用了错误的子目录 \"scripts/scripts/\""
+    },
+    {
+      "dimension": "触发质量",
+      "text": "没有明确说明不支持的场景（如历史日期查询、日历事件等）"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "测试脚本虽然有，但运行失败，需要修复才能发挥验证作用"
+    }
+  ],
+  "session_id": "eval-get-date-1774238693094"
+}
