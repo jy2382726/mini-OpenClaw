@@ -107,6 +107,9 @@ coverage.xml
 *.iws
 *.ipr
 
+# Claude IDE
+.claude/
+
 # Vim
 *.swp
 *.swo
