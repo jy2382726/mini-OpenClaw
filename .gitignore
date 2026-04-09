@@ -110,6 +110,9 @@ coverage.xml
 # Claude IDE
 .claude/
 
+# Playwright MCP
+.playwright-mcp/
+
 # Vim
 *.swp
 *.swo
