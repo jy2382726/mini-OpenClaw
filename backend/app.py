@@ -27,6 +27,24 @@ async def lifespan(app: FastAPI):
     indexer = get_memory_indexer(BASE_DIR)
     indexer.rebuild_index()
 
+    # 条件初始化 mem0 记忆系统（失败不阻塞启动）
+    try:
+        from config import get_mem0_config
+        mem0_cfg = get_mem0_config()
+        if mem0_cfg.get("enabled"):
+            from graph.mem0_manager import get_mem0_manager
+            from graph.memory_buffer import get_memory_buffer
+
+            mem0_mgr = get_mem0_manager(BASE_DIR)
+            # 恢复缓冲区（从持久化文件）
+            buffer = get_memory_buffer(BASE_DIR)
+            if buffer.pending_count > 0:
+                print(f"📦 发现 {buffer.pending_count} 条缓冲对话待处理")
+    except ImportError:
+        print("⚠️ mem0 未安装，跳过记忆系统初始化")
+    except Exception as e:
+        print(f"⚠️ mem0 初始化失败（不影响核心功能）: {e}")
+
     print("✅ mini OpenClaw backend ready")
     yield
 
@@ -58,6 +76,13 @@ app.include_router(sessions_router, prefix="/api")
 app.include_router(tokens_router, prefix="/api")
 app.include_router(compress_router, prefix="/api")
 app.include_router(config_router, prefix="/api")
+
+# mem0 记忆管理 API（条件注册）
+try:
+    from api.mem0_api import router as mem0_router
+    app.include_router(mem0_router, prefix="/api")
+except ImportError:
+    pass
 
 
 @app.get("/")

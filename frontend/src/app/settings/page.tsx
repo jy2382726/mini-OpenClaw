@@ -35,9 +35,16 @@ const CATEGORIES: { key: SettingsCategory; label: string; icon: React.ElementTyp
 ];
 
 const LLM_PROVIDERS = [
-  { value: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com" },
-  { value: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
-  { value: "custom", label: "自定义", baseUrl: "" },
+  { value: "dashscope", label: "DashScope (通义千问)", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen3.5-plus" },
+  { value: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com", defaultModel: "deepseek-chat" },
+  { value: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
+  { value: "custom", label: "自定义", baseUrl: "", defaultModel: "" },
+];
+
+const EMB_PROVIDERS = [
+  { value: "dashscope", label: "DashScope", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", defaultModel: "text-embedding-v4" },
+  { value: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", defaultModel: "text-embedding-3-small" },
+  { value: "custom", label: "自定义", baseUrl: "", defaultModel: "" },
 ];
 
 export default function SettingsPage() {
@@ -47,10 +54,10 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  // LLM form state
-  const [llmProvider, setLlmProvider] = useState("deepseek");
-  const [llmModel, setLlmModel] = useState("deepseek-chat");
-  const [llmBaseUrl, setLlmBaseUrl] = useState("https://api.deepseek.com");
+  // LLM form state（默认值等待后端加载后覆盖）
+  const [llmProvider, setLlmProvider] = useState("");
+  const [llmModel, setLlmModel] = useState("");
+  const [llmBaseUrl, setLlmBaseUrl] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [llmApiKeyMasked, setLlmApiKeyMasked] = useState("");
   const [showLlmKey, setShowLlmKey] = useState(false);
@@ -60,9 +67,9 @@ export default function SettingsPage() {
   const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Embedding form state
-  const [embProvider, setEmbProvider] = useState("openai");
-  const [embModel, setEmbModel] = useState("text-embedding-3-small");
-  const [embBaseUrl, setEmbBaseUrl] = useState("https://api.openai.com/v1");
+  const [embProvider, setEmbProvider] = useState("");
+  const [embModel, setEmbModel] = useState("");
+  const [embBaseUrl, setEmbBaseUrl] = useState("");
   const [embApiKey, setEmbApiKey] = useState("");
   const [embApiKeyMasked, setEmbApiKeyMasked] = useState("");
   const [showEmbKey, setShowEmbKey] = useState(false);
@@ -82,18 +89,18 @@ export default function SettingsPage() {
     getSettings()
       .then((s) => {
         setSettings(s);
-        // Populate LLM fields
-        setLlmProvider(s.llm.provider);
-        setLlmModel(s.llm.model);
-        setLlmBaseUrl(s.llm.base_url);
-        setLlmApiKeyMasked(s.llm.api_key_masked);
-        setTemperature(s.llm.temperature);
-        setMaxTokens(s.llm.max_tokens);
+        // Populate LLM fields（从后端实际配置同步）
+        setLlmProvider(s.llm.provider || "");
+        setLlmModel(s.llm.model || "");
+        setLlmBaseUrl(s.llm.base_url || "");
+        setLlmApiKeyMasked(s.llm.api_key_masked || "");
+        setTemperature(s.llm.temperature ?? 0.7);
+        setMaxTokens(s.llm.max_tokens ?? 4096);
         // Populate Embedding fields
-        setEmbProvider(s.embedding.provider);
-        setEmbModel(s.embedding.model);
-        setEmbBaseUrl(s.embedding.base_url);
-        setEmbApiKeyMasked(s.embedding.api_key_masked);
+        setEmbProvider(s.embedding.provider || "");
+        setEmbModel(s.embedding.model || "");
+        setEmbBaseUrl(s.embedding.base_url || "");
+        setEmbApiKeyMasked(s.embedding.api_key_masked || "");
         // Populate RAG fields
         setRagEnabled(s.rag.enabled);
         setRagTopK(s.rag.top_k);
@@ -153,11 +160,6 @@ export default function SettingsPage() {
   }, [llmProvider, llmModel, llmBaseUrl, llmApiKey, temperature, maxTokens, embProvider, embModel, embBaseUrl, embApiKey, ragEnabled, ragTopK, ragThreshold, compRatio, showToast]);
 
   const handleTestLlm = useCallback(async () => {
-    const key = llmApiKey || settings?.llm.api_key_masked || "";
-    if (!key || key === "***") {
-      setLlmTestResult({ ok: false, msg: "请先输入 API Key" });
-      return;
-    }
     setLlmTesting(true);
     setLlmTestResult(null);
     try {
@@ -166,7 +168,8 @@ export default function SettingsPage() {
         provider: llmProvider,
         model: llmModel,
         base_url: llmBaseUrl,
-        api_key: llmApiKey || "",
+        // 如果用户输入了新 key 就用新的，否则传空让后端使用已保存的 key
+        api_key: llmApiKey || undefined as unknown as string,
       });
       setLlmTestResult({ ok: true, msg: `连接成功 (${result.latency_ms}ms)` });
     } catch (err) {
@@ -177,11 +180,6 @@ export default function SettingsPage() {
   }, [llmApiKey, llmProvider, llmModel, llmBaseUrl, settings]);
 
   const handleTestEmb = useCallback(async () => {
-    const key = embApiKey || settings?.embedding.api_key_masked || "";
-    if (!key || key === "***") {
-      setEmbTestResult({ ok: false, msg: "请先输入 API Key" });
-      return;
-    }
     setEmbTesting(true);
     setEmbTestResult(null);
     try {
@@ -190,7 +188,7 @@ export default function SettingsPage() {
         provider: embProvider,
         model: embModel,
         base_url: embBaseUrl,
-        api_key: embApiKey || "",
+        api_key: embApiKey || undefined as unknown as string,
       });
       setEmbTestResult({ ok: true, msg: `连接成功 (${result.dimensions}维, ${result.latency_ms}ms)` });
     } catch (err) {
@@ -253,9 +251,19 @@ export default function SettingsPage() {
                   <select
                     value={llmProvider}
                     onChange={(e) => {
-                      setLlmProvider(e.target.value);
-                      const p = LLM_PROVIDERS.find((p) => p.value === e.target.value);
-                      if (p && p.baseUrl) setLlmBaseUrl(p.baseUrl);
+                      const val = e.target.value;
+                      const prevProvider = llmProvider;
+                      setLlmProvider(val);
+                      const p = LLM_PROVIDERS.find((p) => p.value === val);
+                      if (p) {
+                        if (p.baseUrl) setLlmBaseUrl(p.baseUrl);
+                        if (p.defaultModel) setLlmModel(p.defaultModel);
+                      }
+                      // 切换供应商时清空 API Key，避免混淆
+                      if (val !== prevProvider) {
+                        setLlmApiKey("");
+                        setLlmApiKeyMasked("");
+                      }
                     }}
                     className="form-select"
                   >
@@ -270,7 +278,7 @@ export default function SettingsPage() {
                     value={llmModel}
                     onChange={(e) => setLlmModel(e.target.value)}
                     className="form-input"
-                    placeholder="deepseek-chat"
+                    placeholder="qwen3.5-plus"
                   />
                 </FormField>
                 <FormField label="Base URL">
@@ -279,7 +287,7 @@ export default function SettingsPage() {
                     value={llmBaseUrl}
                     onChange={(e) => setLlmBaseUrl(e.target.value)}
                     className="form-input"
-                    placeholder="https://api.deepseek.com"
+                    placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
                   />
                 </FormField>
                 <FormField label="API Key">
@@ -350,13 +358,25 @@ export default function SettingsPage() {
                   <select
                     value={embProvider}
                     onChange={(e) => {
-                      setEmbProvider(e.target.value);
-                      if (e.target.value === "openai") setEmbBaseUrl("https://api.openai.com/v1");
+                      const val = e.target.value;
+                      const prevProvider = embProvider;
+                      setEmbProvider(val);
+                      const p = EMB_PROVIDERS.find((p) => p.value === val);
+                      if (p) {
+                        if (p.baseUrl) setEmbBaseUrl(p.baseUrl);
+                        if (p.defaultModel) setEmbModel(p.defaultModel);
+                      }
+                      // 切换供应商时清空 API Key，避免混淆
+                      if (val !== prevProvider) {
+                        setEmbApiKey("");
+                        setEmbApiKeyMasked("");
+                      }
                     }}
                     className="form-select"
                   >
-                    <option value="openai">OpenAI</option>
-                    <option value="custom">自定义</option>
+                    {EMB_PROVIDERS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
                   </select>
                 </FormField>
                 <FormField label="Model">

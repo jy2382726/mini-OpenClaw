@@ -144,6 +144,11 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
 
                 session_manager.save_message(session_id, "user", message)
                 for seg in segments:
+                    # 跳过无内容且无工具调用的空 segment
+                    if not seg["content"] and not seg["tool_calls"]:
+                        continue
+                    # 如果 segment 仅有工具调用但无文本内容，
+                    # 检查后续 segment 是否有内容，避免保存孤立的空工具调用
                     tc = seg["tool_calls"] if seg["tool_calls"] else None
                     session_manager.save_message(
                         session_id, "assistant", seg["content"], tool_calls=tc

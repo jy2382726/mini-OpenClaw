@@ -101,3 +101,5 @@ wrapt==2.1.2
 xxhash==3.6.0
 yarl==1.23.0
 zstandard==0.25.0
+mem0ai>=0.1.0
+qdrant-client>=1.9.0

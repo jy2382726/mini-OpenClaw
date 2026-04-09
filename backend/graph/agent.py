@@ -1,12 +1,13 @@
 """AgentManager — Core Agent using LangChain create_agent API with DashScope Qwen."""
 
 import os
+import threading
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from langchain_core.messages import HumanMessage, AIMessage
 
-from config import get_rag_mode, load_config
+from config import get_rag_mode, load_config, get_mem0_config
 from graph.prompt_builder import build_system_prompt
 from graph.session_manager import session_manager, COMPRESSED_CONTEXT_PREFIX
 from tools import get_all_tools
@@ -156,24 +157,22 @@ class AgentManager:
           {"type": "done", "content": "..."}
         """
         # RAG retrieval: inject memory context if enabled
+        # 通过统一检索接口获取记忆（支持 legacy/mem0/hybrid 三种模式）
         rag_mode = get_rag_mode()
         rag_context = ""
         if rag_mode and self._base_dir:
-            from graph.memory_indexer import get_memory_indexer
+            from graph.memory_retriever import get_retriever
 
-            indexer = get_memory_indexer(self._base_dir)
-            results = indexer.retrieve(message)
-            if results:
-                yield {
-                    "type": "retrieval",
-                    "query": message,
-                    "results": results,
-                }
-                snippets = "\n\n".join(
-                    f"[片段 {i+1}] (score: {r['score']})\n{r['text']}"
-                    for i, r in enumerate(results)
-                )
-                rag_context = f"[记忆检索结果]\n{snippets}"
+            retriever = get_retriever(self._base_dir)
+            if retriever:
+                results = retriever.retrieve(message)
+                if results:
+                    yield {
+                        "type": "retrieval",
+                        "query": message,
+                        "results": results,
+                    }
+                    rag_context = retriever.format_context(results)
 
         agent = self._build_agent()
 
@@ -236,6 +235,47 @@ class AgentManager:
                                         }
 
         yield {"type": "done", "content": full_response}
+
+        # 智能截流：将对话追加到缓冲区，由缓冲区判断是否触发 mem0 写入
+        # 关键优化：mem0 的 add() 会调用 LLM 做事实提取（约 20-90 秒），
+        # 因此将实际的 mem0 写入放到后台线程，不阻塞 SSE 响应流。
+        if self._base_dir and full_response:
+            mem0_cfg = get_mem0_config()
+            if mem0_cfg.get("enabled") and mem0_cfg.get("auto_extract"):
+                self._schedule_mem0_write(message, full_response, mem0_cfg)
+
+    def _schedule_mem0_write(
+        self, user_message: str, assistant_message: str, mem0_cfg: dict
+    ) -> None:
+        """在后台线程中执行 mem0 缓冲写入，不阻塞聊天响应。"""
+        base_dir = self._base_dir
+        assert base_dir is not None
+
+        def _background_write() -> None:
+            try:
+                from graph.memory_buffer import get_memory_buffer
+                from graph.mem0_manager import get_mem0_manager
+
+                buffer = get_memory_buffer(base_dir)
+                buffer.add_turn(user_message, assistant_message, "default")
+
+                # 检查立即触发（显式指令/强烈纠正）
+                should_flush = buffer.check_immediate_trigger(user_message)
+                # 检查轮次/时间触发
+                if not should_flush:
+                    should_flush = buffer.should_flush()
+
+                if should_flush:
+                    turns = buffer.flush()
+                    if turns:
+                        mgr = get_mem0_manager(base_dir)
+                        mgr.batch_add(turns, user_id=mem0_cfg.get("user_id", "default"))
+                        print(f"🧠 mem0 后台写入完成（{len(turns)} 轮对话）")
+            except Exception as e:
+                print(f"⚠️ mem0 后台写入失败: {e}")
+
+        thread = threading.Thread(target=_background_write, daemon=True)
+        thread.start()
 
     async def ainvoke(self, message: str, session_id: str) -> str:
         """Non-streaming invocation (fallback)."""

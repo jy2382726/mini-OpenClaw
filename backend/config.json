@@ -1,10 +1,10 @@
 {
-  "rag_mode": false,
+  "rag_mode": true,
   "llm": {
     "provider": "dashscope",
     "model": "qwen3.5-plus",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "api_key": "",
+    "api_key": "sk-4dfa4c7c18bd41fa994ad0fd2557deab",
     "temperature": 0.7,
     "max_tokens": 8096
   },
@@ -20,5 +20,18 @@
   },
   "compression": {
     "ratio": 0.5
+  },
+  "mem0": {
+    "enabled": true,
+    "mode": "mem0",
+    "auto_extract": true,
+    "user_id": "default",
+    "buffer_size": 5,
+    "flush_interval_seconds": 300,
+    "consolidation_interval_hours": 24,
+    "consolidation_threshold": 50,
+    "stale_threshold_days": 7,
+    "expire_threshold_days": 30,
+    "min_confidence": 0.3
   }
 }

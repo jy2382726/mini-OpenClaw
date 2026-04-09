@@ -6,6 +6,7 @@ import { User, AlertTriangle, Key } from "lucide-react";
 import type { ChatMessage as ChatMessageType } from "@/lib/store";
 import ThoughtChain from "./ThoughtChain";
 import RetrievalCard from "./RetrievalCard";
+import Mem0Card from "./Mem0Card";
 
 interface Props {
   message: ChatMessageType;
@@ -74,12 +75,20 @@ export default function ChatMessage({ message }: Props) {
                   {message.retrievals && message.retrievals.length > 0 && (
                     <RetrievalCard retrievals={message.retrievals} />
                   )}
+                  {message.mem0Retrievals && message.mem0Retrievals.length > 0 && (
+                    <Mem0Card memories={message.mem0Retrievals} />
+                  )}
                   <div className="text-[10px] text-gray-400 mt-1 pl-1">
                     {formatTime(message.timestamp)}
                   </div>
                 </div>
+              ) : message.toolCalls && message.toolCalls.length > 0 ? (
+                /* 有工具调用但无文本内容时，只显示时间戳（工具调用已在上方 ThoughtChain 展示） */
+                <div className="text-[10px] text-gray-400 mt-1 pl-1">
+                  {formatTime(message.timestamp)}
+                </div>
               ) : (
-                /* Typing indicator */
+                /* Typing indicator — 仅在无内容且无工具调用时显示 */
                 <div className="bg-white/60 px-4 py-3 rounded-2xl rounded-tl-md inline-flex items-center gap-1.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] border border-black/[0.04]">
                   <span className="typing-dot w-1.5 h-1.5 bg-[#002fa7] rounded-full" />
                   <span className="typing-dot w-1.5 h-1.5 bg-[#002fa7] rounded-full" />

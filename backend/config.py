@@ -29,6 +29,22 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "compression": {
         "ratio": 0.5,
     },
+    "mem0": {
+        "enabled": False,
+        "mode": "legacy",  # "legacy" | "mem0" | "hybrid"
+        "auto_extract": True,
+        "user_id": "default",
+        # 智能截流参数
+        "buffer_size": 5,
+        "flush_interval_seconds": 300,
+        # 离线整合参数
+        "consolidation_interval_hours": 24,
+        "consolidation_threshold": 50,
+        # 防御性读取参数
+        "stale_threshold_days": 7,
+        "expire_threshold_days": 30,
+        "min_confidence": 0.3,
+    },
 }
 
 
@@ -74,6 +90,23 @@ def set_rag_mode(enabled: bool) -> None:
     save_config(config)
 
 
+def get_mem0_config() -> dict[str, Any]:
+    """获取 mem0 模块配置，始终返回完整默认值。"""
+    config = load_config()
+    defaults = _DEFAULT_CONFIG["mem0"]
+    mem0_cfg = config.get("mem0", {})
+    return _deep_merge(defaults, mem0_cfg)
+
+
+def set_mem0_config(updates: dict[str, Any]) -> None:
+    """更新 mem0 配置（部分更新，自动合并）。"""
+    config = load_config()
+    if "mem0" not in config:
+        config["mem0"] = {}
+    config["mem0"].update(updates)
+    save_config(config)
+
+
 def mask_api_key(key: str) -> str:
     """Mask API key for display: sk-***...last4"""
     if not key or len(key) < 8:
@@ -98,6 +131,7 @@ def get_settings_for_display() -> dict[str, Any]:
             **config.get("rag", {}),
         },
         "compression": config.get("compression", {}),
+        "mem0": config.get("mem0", _DEFAULT_CONFIG["mem0"]),
     }
     # Remove raw API keys from response
     result["llm"].pop("api_key", None)
@@ -146,5 +180,18 @@ def update_settings(updates: dict[str, Any]) -> None:
             config["compression"] = {}
         if "ratio" in comp_update:
             config["compression"]["ratio"] = comp_update["ratio"]
+
+    if "mem0" in updates:
+        mem0_update = updates["mem0"]
+        if "mem0" not in config:
+            config["mem0"] = {}
+        for key in (
+            "enabled", "mode", "auto_extract", "user_id",
+            "buffer_size", "flush_interval_seconds",
+            "consolidation_interval_hours", "consolidation_threshold",
+            "stale_threshold_days", "expire_threshold_days", "min_confidence",
+        ):
+            if key in mem0_update:
+                config["mem0"][key] = mem0_update[key]
 
     save_config(config)

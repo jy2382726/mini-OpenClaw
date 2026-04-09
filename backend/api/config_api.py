@@ -78,16 +78,29 @@ async def test_connection(request: TestConnectionRequest):
     """Test API key connectivity with a lightweight request."""
     import time
 
+    from config import load_config
+
+    # 如果前端没有传 key，使用配置中已保存的 key
+    api_key = request.api_key
+    if not api_key:
+        config = load_config()
+        if request.type == "llm":
+            api_key = config.get("llm", {}).get("api_key", "")
+        elif request.type == "embedding":
+            api_key = config.get("embedding", {}).get("api_key", "")
+        if not api_key:
+            raise HTTPException(status_code=400, detail="请先配置 API Key")
+
     start = time.time()
 
     try:
         if request.type == "llm":
             result = await _test_llm_connection(
-                request.provider, request.model, request.base_url, request.api_key
+                request.provider, request.model, request.base_url, api_key
             )
         elif request.type == "embedding":
             result = await _test_embedding_connection(
-                request.provider, request.model, request.base_url, request.api_key
+                request.provider, request.model, request.base_url, api_key
             )
         else:
             raise HTTPException(status_code=400, detail="type must be 'llm' or 'embedding'")
