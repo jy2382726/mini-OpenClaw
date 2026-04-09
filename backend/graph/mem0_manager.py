@@ -102,20 +102,46 @@ class Mem0Manager:
             "fact_extraction_prompt": self._build_extraction_prompt(),
         }
 
-        # 关闭思考模式（qwen3.5-flash 默认启用 thinking，对结构化抽取不必要且增加延迟）
-        if extraction_cfg.get("enable_thinking") is False:
-            mem0_config["llm"]["config"]["extra_body"] = {"enable_thinking": False}
-
         try:
             from mem0 import Memory
             self._memory = Memory.from_config(mem0_config)
-            print(f"🧠 mem0 记忆管理器已初始化 (数据目录: {mem0_data_dir})")
+
+            # 关闭思考模式：mem0 的 OpenAIConfig 不支持 extra_body 参数，
+            # 所以在初始化后 patch LLM 的 generate_response 方法注入该参数
+            if extraction_cfg.get("enable_thinking") is False and self._memory is not None:
+                self._patch_disable_thinking()
+
+            print(f"🧠 mem0 记忆管理器已初始化 (数据目录: {mem0_data_dir}, 抽取模型: {llm_model})")
         except ImportError:
             print("⚠️ mem0 未安装，跳过初始化。安装方式: pip install mem0ai")
             self._memory = None
         except Exception as e:
-            print(f"⚠️ mem0 初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
             self._memory = None
+
+    def _patch_disable_thinking(self) -> None:
+        """Patch mem0 内部 LLM 的 generate_response，注入 enable_thinking=False。
+
+        mem0 的 OpenAIConfig 不支持 extra_body 参数，
+        通过包装 generate_response 方法在调用时自动添加。
+        """
+        try:
+            llm = getattr(self._memory, "llm", None)
+            if llm is None:
+                return
+
+            original_generate = llm.generate_response
+
+            def patched_generate(*args, **kwargs):
+                kwargs.setdefault("extra_body", {})
+                if isinstance(kwargs["extra_body"], dict):
+                    kwargs["extra_body"]["enable_thinking"] = False
+                return original_generate(*args, **kwargs)
+
+            llm.generate_response = patched_generate
+        except Exception as e:
+            print(f"⚠️ patch enable_thinking 失败（不影响功能，但 thinking 可能未关闭）: {e}")
 
     @property
     def is_ready(self) -> bool:
