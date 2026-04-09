@@ -777,4 +777,55 @@ def get_retriever(base_dir: Path) -> MemoryRetriever | None:
 7. 创建冲突记忆（先说 A 后说 B），执行整合，验证冲突解决
 8. 前端 Mem0Card 正确展示置信度、新鲜度、类型标签
 9. 设置页面可触发手动整合、查看整合报告
+
+---
+
+## 性能优化（2026-04-09 实施）
+
+mem0 集成后发现写入延迟过高（20-90 秒），进行了 6 项性能优化。详见 [性能优化方案](2026-04-09-mem0-performance-optimization.md)。
+
+### 优化前后架构对比
+
+```
+优化前写入流程：
+  Agent 回复 → Thread(target=background_write) → mgr.batch_add()
+    ├─ LLM 事实提取（qwen3.5-plus, thinking 开启）  15-60s
+    ├─ Embedding 计算                                2-5s
+    └─ Qdrant 写入                                   <100ms
+  总计: 20-90s
+
+优化后写入流程：
+  Agent 回复 → ThreadPoolExecutor(4).submit(background_write) → mgr.batch_add()
+    ├─ LLM 事实提取（qwen3.5-flash, thinking 关闭）  2-5s
+    ├─ Embedding 计算                                2-5s
+    └─ Qdrant 写入                                   <100ms
+  总计: ~5s
+```
+
+### 优化项目清单
+
+| 优化项 | 改动文件 | 效果 |
+|--------|---------|------|
+| 独立轻量 LLM（qwen3.5-flash + thinking off） | config.json, config.py, mem0_manager.py | 写入延迟从 20-90s → 5s |
+| ThreadPoolExecutor 替代裸 Thread | agent.py | 并发线程可控，超出排队不丢弃 |
+| 检索异步化（run_in_executor） | memory_retriever.py, agent.py | 检索不阻塞 SSE 事件循环 |
+| 整合管道单次扫描 | memory_consolidator.py | get_all() 从 3 次 → 1 次 |
+| verify_memory 先加后删 | mem0_manager.py | 消除数据丢失窗口 |
+| 配置缓存（30s TTL） | config.py | 避免每次请求读磁盘 |
+
+### 实施中发现的额外 Bug
+
+优化过程中额外发现并修复了 3 个原始集成代码的 bug：
+1. `verify_memory()` 遍历 `_memory.get_all()` 返回的 dict 时未提取 `results` 列表
+2. `verify_memory()` add 失败后仍返回 `True`
+3. mem0 `OpenAIConfig` 不支持 `extra_body`，需通过 patch `generate_response` 注入
+
+### 真实环境验证结果
+
+10 项端到端联调测试全部通过（真实 DashScope API + Qdrant 本地存储），关键数据：
+- batch_add(3 turns): **5.2s**
+- 同步/异步/并行检索均正常
+- 整合管道 get_all 调用 1 次
+- verify 先加后删，旧 ID 正确替换
+- 配置缓存命中 + save 失效
 10. 服务重启后，验证缓冲区是否从持久化文件恢复
