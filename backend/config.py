@@ -1,10 +1,16 @@
-"""Global configuration management — JSON-based persistence."""
+"""Global configuration management — JSON-based persistence with TTL cache."""
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+
+# 配置缓存：避免每次请求都读磁盘解析 JSON
+_cache: dict[str, Any] | None = None
+_cache_ts: float = 0.0
+_CACHE_TTL: float = 30.0  # 缓存有效期 30 秒
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "rag_mode": False,
@@ -44,6 +50,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "stale_threshold_days": 7,
         "expire_threshold_days": 30,
         "min_confidence": 0.3,
+        # 独立抽取模型（可选，不配置则复用主对话模型）
+        "extraction_model": {},
     },
 }
 
@@ -60,22 +68,36 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_config() -> dict[str, Any]:
-    """Load configuration from disk, returning defaults if missing."""
+    """Load configuration from disk, returning defaults if missing.
+
+    使用 TTL 缓存（30秒）避免每次请求都读磁盘。
+    """
+    global _cache, _cache_ts
+    now = time.monotonic()
+    if _cache is not None and (now - _cache_ts) < _CACHE_TTL:
+        return _cache
+
     if not CONFIG_FILE.exists():
-        return json.loads(json.dumps(_DEFAULT_CONFIG))
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        return _deep_merge(_DEFAULT_CONFIG, data)
-    except Exception:
-        return json.loads(json.dumps(_DEFAULT_CONFIG))
+        _cache = json.loads(json.dumps(_DEFAULT_CONFIG))
+    else:
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            _cache = _deep_merge(_DEFAULT_CONFIG, data)
+        except Exception:
+            _cache = json.loads(json.dumps(_DEFAULT_CONFIG))
+    _cache_ts = now
+    return _cache
 
 
 def save_config(config: dict[str, Any]) -> None:
-    """Persist configuration to disk."""
+    """Persist configuration to disk and invalidate cache."""
+    global _cache, _cache_ts
     CONFIG_FILE.write_text(
         json.dumps(config, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    _cache = None
+    _cache_ts = 0.0
 
 
 def get_rag_mode() -> bool:

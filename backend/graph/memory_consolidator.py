@@ -57,13 +57,19 @@ class MemoryConsolidator:
         self._min_confidence = cfg.get("min_confidence", 0.3)
 
     def run_consolidation(self) -> ConsolidationReport:
-        """执行完整的整合管道，返回报告。"""
+        """执行完整的整合管道，返回报告。
+
+        优化：仅在最开始调用一次 get_all()，后续阶段复用同一份数据，
+        通过延迟删除列表收集待删除 ID，最后统一执行。
+        """
         report = ConsolidationReport()
         all_memories = self._mgr.get_all()
         report.total_memories = len(all_memories)
 
         if not all_memories:
             return report
+
+        pending_deletes: list[str] = []
 
         # 阶段 1：去重
         try:
@@ -73,32 +79,48 @@ class MemoryConsolidator:
             report.errors.append(f"去重阶段失败: {e}")
             groups = []
 
-        # 阶段 2：合并
+        # 阶段 2：合并（收集待删除 ID，不立即执行）
         for group in groups:
             try:
-                self._merge_group(group)
+                deletes = self._merge_group_deferred(group)
+                pending_deletes.extend(deletes)
                 report.merged += 1
             except Exception as e:
                 report.errors.append(f"合并失败: {e}")
 
-        # 阶段 3：冲突检测
+        # 阶段 3：冲突检测（基于初始数据 + 待删除集合过滤）
         try:
-            refreshed = self._mgr.get_all()
-            conflicts = self._detect_conflicts(refreshed)
+            active_memories = [
+                m for m in all_memories
+                if m.get("id", "") not in set(pending_deletes)
+            ]
+            conflicts = self._detect_conflicts(active_memories)
             report.conflicts_detected = len(conflicts)
-            resolved = self._auto_resolve(conflicts)
+            resolved = self._auto_resolve_deferred(conflicts, pending_deletes)
             report.conflicts_resolved = len(resolved)
             report.conflicts_pending = len(conflicts) - len(resolved)
         except Exception as e:
             report.errors.append(f"冲突检测失败: {e}")
 
-        # 阶段 4：过期清理
+        # 阶段 4：过期清理（同样收集待删除 ID）
         try:
-            refreshed = self._mgr.get_all()
-            expired = self._expire_stale(refreshed)
-            report.expired = len(expired)
+            # 过滤掉已在待删除列表中的记忆
+            remaining = [
+                m for m in all_memories
+                if m.get("id", "") not in set(pending_deletes)
+            ]
+            expired_ids = self._expire_stale_deferred(remaining)
+            pending_deletes.extend(expired_ids)
+            report.expired = len(expired_ids)
         except Exception as e:
             report.errors.append(f"过期清理失败: {e}")
+
+        # 统一执行删除
+        for mem_id in pending_deletes:
+            try:
+                self._mgr.delete(mem_id)
+            except Exception as e:
+                report.errors.append(f"删除记忆 {mem_id} 失败: {e}")
 
         return report
 
@@ -161,41 +183,31 @@ class MemoryConsolidator:
         return len(intersection) / len(union) if union else 0.0
 
     def _merge_group(self, group: MemoryGroup) -> None:
-        """合并一组重复记忆。
+        """合并一组重复记忆（立即删除版，向后兼容）。"""
+        deletes = self._merge_group_deferred(group)
+        for mem_id in deletes:
+            self._mgr.delete(mem_id)
 
-        保留主记忆（最完整的），删除其余。
-        将被删记忆中的独有信息合并到主记忆的元数据中。
+    def _merge_group_deferred(self, group: MemoryGroup) -> list[str]:
+        """合并一组重复记忆，返回待删除 ID 列表（延迟删除）。
+
+        保留主记忆（最完整的），收集其余待删除。
         """
         if len(group.memories) <= 1:
-            return
+            return []
 
         primary = group.memories[group.primary_index]
-
-        # 收集所有独有的 why 和 how_to_apply 信息
-        extra_whys: list[str] = []
-        extra_hows: list[str] = []
+        pending_deletes: list[str] = []
 
         for i, mem in enumerate(group.memories):
             if i == group.primary_index:
                 continue
 
-            meta = mem.get("metadata", {})
-            why = meta.get("why", "")
-            how = meta.get("how_to_apply", "")
-            if why and why not in (primary.get("metadata", {}).get("why", "")):
-                extra_whys.append(why)
-            if how and how not in (primary.get("metadata", {}).get("how_to_apply", "")):
-                extra_hows.append(how)
-
-            # 删除非主记忆
             mem_id = mem.get("id")
             if mem_id:
-                self._mgr.delete(mem_id)
+                pending_deletes.append(mem_id)
 
-        # 如果有额外的 why/how 信息，合并到主记忆
-        # 由于 mem0 没有原生 update metadata 接口，
-        # 这里暂时只做删除，主记忆保持不变
-        # TODO: 待 mem0 支持 update 后优化
+        return pending_deletes
 
     def _detect_conflicts(self, memories: list[dict[str, Any]]) -> list[ConflictAction]:
         """检测互相矛盾的记忆。
@@ -238,39 +250,54 @@ class MemoryConsolidator:
         return conflicts
 
     def _auto_resolve(self, conflicts: list[ConflictAction]) -> list[ConflictAction]:
-        """自动解决冲突：时间优先，保留更新的记忆。"""
+        """自动解决冲突：时间优先，保留更新的记忆（立即删除版）。"""
+        resolved: list[ConflictAction] = []
+        _unused: list[str] = []
+        for conflict in self._auto_resolve_deferred(conflicts, _unused):
+            resolved.append(conflict)
+        # 立即执行删除
+        for mem_id in _unused:
+            try:
+                self._mgr.delete(mem_id)
+            except Exception:
+                pass
+        return resolved
+
+    def _auto_resolve_deferred(
+        self, conflicts: list[ConflictAction], pending_deletes: list[str]
+    ) -> list[ConflictAction]:
+        """自动解决冲突（延迟删除版）：保留较新记忆，旧记忆 ID 加入待删除列表。"""
         resolved: list[ConflictAction] = []
 
         for conflict in conflicts:
-            try:
-                # 获取两条记忆的创建时间
-                # 假设 ID 中包含时间信息或通过 metadata 获取
-                # 简单策略：保留 new_memory（后创建的），删除 old_memory
-                if conflict.old_memory_id:
-                    self._mgr.delete(conflict.old_memory_id)
-                    conflict.auto_resolved = True
-                    conflict.reason = "时间优先：保留较新的记忆"
-                    resolved.append(conflict)
-            except Exception:
-                # 无法自动解决，保留冲突等待用户处理
-                pass
+            if conflict.old_memory_id:
+                pending_deletes.append(conflict.old_memory_id)
+                conflict.auto_resolved = True
+                conflict.reason = "时间优先：保留较新的记忆"
+                resolved.append(conflict)
 
         return resolved
 
     def _expire_stale(self, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """清理确认过期的记忆。
+        """清理确认过期的记忆（立即删除版）。"""
+        expired_ids = self._expire_stale_deferred(memories)
+        expired = [m for m in memories if m.get("id") in set(expired_ids)]
+        for mem_id in expired_ids:
+            self._mgr.delete(mem_id)
+        return expired
 
-        规则：
-        - confidence < min_confidence 且超过 expire_days 未验证 → 删除
+    def _expire_stale_deferred(self, memories: list[dict[str, Any]]) -> list[str]:
+        """清理确认过期的记忆（延迟删除版），返回待删除 ID 列表。
+
+        规则：confidence < min_confidence 且超过 expire_days 未验证 → 删除
         """
-        expired: list[dict[str, Any]] = []
+        pending: list[str] = []
 
         for mem in memories:
             meta = mem.get("metadata", {})
             confidence = meta.get("confidence", 1.0)
             created_at = meta.get("created_at", "")
 
-            # 计算存活天数
             if not created_at:
                 continue
 
@@ -280,11 +307,9 @@ class MemoryConsolidator:
             except (ValueError, TypeError):
                 continue
 
-            # 过期判定
             if confidence < self._min_confidence and age_days > self._expire_days:
                 mem_id = mem.get("id")
                 if mem_id:
-                    self._mgr.delete(mem_id)
-                    expired.append(mem)
+                    pending.append(mem_id)
 
-        return expired
+        return pending

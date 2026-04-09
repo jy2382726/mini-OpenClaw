@@ -2,6 +2,7 @@
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -20,6 +21,7 @@ class AgentManager:
         self._base_dir: Path | None = None
         self._tools: list = []
         self._llm = None
+        self._write_executor = ThreadPoolExecutor(max_workers=4)
 
     def initialize(self, base_dir: Path) -> None:
         """Initialize LLM (DashScope Qwen) and tools. Called once at startup."""
@@ -165,7 +167,7 @@ class AgentManager:
 
             retriever = get_retriever(self._base_dir)
             if retriever:
-                results = retriever.retrieve(message)
+                results = await retriever.retrieve_async(message)
                 if results:
                     yield {
                         "type": "retrieval",
@@ -274,8 +276,7 @@ class AgentManager:
             except Exception as e:
                 print(f"⚠️ mem0 后台写入失败: {e}")
 
-        thread = threading.Thread(target=_background_write, daemon=True)
-        thread.start()
+        self._write_executor.submit(_background_write)
 
     async def ainvoke(self, message: str, session_id: str) -> str:
         """Non-streaming invocation (fallback)."""

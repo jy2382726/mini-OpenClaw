@@ -32,6 +32,13 @@
     "consolidation_threshold": 50,
     "stale_threshold_days": 7,
     "expire_threshold_days": 30,
-    "min_confidence": 0.3
+    "min_confidence": 0.3,
+    "extraction_model": {
+      "model": "qwen3.5-flash",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "",
+      "max_tokens": 512,
+      "enable_thinking": false
+    }
   }
 }

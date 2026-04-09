@@ -9,6 +9,7 @@
 agent.py 只需调用 get_retriever()，无需关心底层实现。
 """
 
+import asyncio
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -41,6 +42,14 @@ class MemoryRetriever(ABC):
             }]
         """
         ...
+
+    async def retrieve_async(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+        """异步检索，通过 run_in_executor 避免阻塞事件循环。
+
+        默认实现包装同步 retrieve()，子类可覆盖以提供更优的异步实现。
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.retrieve, query, top_k)
 
     @abstractmethod
     def format_context(self, results: list[dict[str, Any]]) -> str:
@@ -265,11 +274,24 @@ class HybridRetriever(MemoryRetriever):
         self._mem0 = Mem0Retriever(base_dir)
 
     def retrieve(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
-        import asyncio
-
-        # 并行检索两个源
+        # 串行检索两个源（同步模式）
         legacy_results = self._legacy.retrieve(query, top_k=top_k)
         mem0_results = self._mem0.retrieve(query, top_k=top_k)
+        return self._merge_results(legacy_results, mem0_results, top_k)
+
+    async def retrieve_async(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+        """并行异步检索两个源，不阻塞事件循环。"""
+        legacy_task = self._legacy.retrieve_async(query, top_k=top_k)
+        mem0_task = self._mem0.retrieve_async(query, top_k=top_k)
+        legacy_results, mem0_results = await asyncio.gather(legacy_task, mem0_task)
+        return self._merge_results(legacy_results, mem0_results, top_k)
+
+    def _merge_results(
+        self,
+        legacy_results: list[dict[str, Any]],
+        mem0_results: list[dict[str, Any]],
+        top_k: int,
+    ) -> list[dict[str, Any]]:
 
         # 合并结果
         all_results = []

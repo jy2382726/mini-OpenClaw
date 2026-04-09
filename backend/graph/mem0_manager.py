@@ -45,11 +45,22 @@ class Mem0Manager:
         llm_config = config.get("llm", {})
         emb_config = config.get("embedding", {})
 
-        llm_model = llm_config.get("model") or os.getenv("DASHSCOPE_MODEL", "qwen3.5-plus")
-        llm_api_key = llm_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
-        llm_base_url = llm_config.get("base_url") or os.getenv(
-            "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        )
+        # 优先使用 mem0 独立抽取模型，未配置则复用主对话模型
+        extraction_cfg = mem0_cfg.get("extraction_model") or {}
+        if extraction_cfg.get("model"):
+            llm_model = extraction_cfg.get("model")
+            llm_api_key = extraction_cfg.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
+            llm_base_url = extraction_cfg.get("base_url") or os.getenv(
+                "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+            max_tokens = extraction_cfg.get("max_tokens", 512)
+        else:
+            llm_model = llm_config.get("model") or os.getenv("DASHSCOPE_MODEL", "qwen3.5-plus")
+            llm_api_key = llm_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
+            llm_base_url = llm_config.get("base_url") or os.getenv(
+                "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+            max_tokens = llm_config.get("max_tokens", 1500)
 
         emb_model = emb_config.get("model") or "text-embedding-v4"
         emb_api_key = emb_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
@@ -67,7 +78,7 @@ class Mem0Manager:
                     "api_key": llm_api_key,
                     "openai_base_url": llm_base_url,
                     "temperature": 0.1,
-                    "max_tokens": 1500,
+                    "max_tokens": max_tokens,
                 },
             },
             "embedder": {
@@ -90,6 +101,10 @@ class Mem0Manager:
             },
             "fact_extraction_prompt": self._build_extraction_prompt(),
         }
+
+        # 关闭思考模式（qwen3.5-flash 默认启用 thinking，对结构化抽取不必要且增加延迟）
+        if extraction_cfg.get("enable_thinking") is False:
+            mem0_config["llm"]["config"]["extra_body"] = {"enable_thinking": False}
 
         try:
             from mem0 import Memory
@@ -354,11 +369,13 @@ class Mem0Manager:
             original_meta["last_verified_at"] = datetime.now(timezone.utc).isoformat()
             original_meta["confidence"] = min(1.0, original_meta.get("confidence", 0.7) + 0.3)
 
-            # 删除旧记忆，重新添加
-            self._memory.delete(memory_id)
-            self._memory.add(original_text, user_id=self._get_user_id(), metadata=original_meta)
-
-            print(f"✅ 记忆 {memory_id} 已验证（置信度: {original_meta['confidence']}）")
+            # 先添加新版本，成功后再删除旧版本（避免中途失败丢失数据）
+            new_result = self._memory.add(original_text, user_id=self._get_user_id(), metadata=original_meta)
+            if new_result:
+                self._memory.delete(memory_id)
+                print(f"✅ 记忆 {memory_id} 已验证（置信度: {original_meta['confidence']}）")
+            else:
+                print(f"⚠️ 记忆 {memory_id} 新版本添加失败，保留原始记忆")
             return True
         except Exception as e:
             print(f"⚠️ mem0 验证记忆失败: {e}")
