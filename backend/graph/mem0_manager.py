@@ -350,7 +350,8 @@ class Mem0Manager:
 
         try:
             # 获取原始记忆内容
-            all_memories = self._memory.get_all(user_id=self._get_user_id())
+            raw = self._memory.get_all(user_id=self._get_user_id())
+            all_memories = raw.get("results", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
             target = None
             for mem in all_memories:
                 if mem.get("id") == memory_id:
@@ -374,9 +375,10 @@ class Mem0Manager:
             if new_result:
                 self._memory.delete(memory_id)
                 print(f"✅ 记忆 {memory_id} 已验证（置信度: {original_meta['confidence']}）")
+                return True
             else:
                 print(f"⚠️ 记忆 {memory_id} 新版本添加失败，保留原始记忆")
-            return True
+                return False
         except Exception as e:
             print(f"⚠️ mem0 验证记忆失败: {e}")
             return False
