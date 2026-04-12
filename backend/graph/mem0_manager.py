@@ -378,11 +378,8 @@ class Mem0Manager:
             # 获取原始记忆内容
             raw = self._memory.get_all(user_id=self._get_user_id())
             all_memories = raw.get("results", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
-            target = None
-            for mem in all_memories:
-                if mem.get("id") == memory_id:
-                    target = mem
-                    break
+            by_id = {m.get("id"): m for m in all_memories}
+            target = by_id.get(memory_id)
 
             if not target:
                 print(f"⚠️ 记忆 {memory_id} 不存在，无法验证")

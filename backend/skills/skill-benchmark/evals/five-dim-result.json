@@ -1,0 +1,141 @@
+{
+  "skill_name": "skill-benchmark",
+  "timestamp": 1775713950.963,
+  "total_score": 25,
+  "grade": "生产级",
+  "verdict_note": "技能设计成熟，建议增加多模型自动轮询和跨平台执行器支持",
+  "dimensions": [
+    {
+      "name": "触发质量",
+      "score": 5,
+      "reason": "边界定义精确，覆盖四种明确模式，有清晰的\"不应触发\"约束",
+      "checks": [
+        {
+          "item": "边界精确度",
+          "passed": true
+        },
+        {
+          "item": "场景覆盖完整",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "路由清晰度",
+      "score": 5,
+      "reason": "决策树完整，5 种分支覆盖所有场景，有明确的停止条件",
+      "checks": [
+        {
+          "item": "决策树完整",
+          "passed": true
+        },
+        {
+          "item": "停止条件明确",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "上下文效率",
+      "score": 5,
+      "reason": "SKILL.md 仅 62 行，核心逻辑精简，10 个 references 文件正确分层",
+      "checks": [
+        {
+          "item": "SKILL.md 精简 (62 行)",
+          "passed": true
+        },
+        {
+          "item": "引用分层清晰",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "复用与确定性",
+      "score": 5,
+      "reason": "11 个脚本覆盖全流程，有明确的评分规则和信号同义词映射",
+      "checks": [
+        {
+          "item": "脚本覆盖完整 (11 个脚本)",
+          "passed": true
+        },
+        {
+          "item": "执行结果一致",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "验证强度",
+      "score": 5,
+      "reason": "有明确的 4 级判定标准，核心维度公式清晰，9 个测试文件覆盖充分",
+      "checks": [
+        {
+          "item": "Validation 章节完整",
+          "passed": true
+        },
+        {
+          "item": "成功标准明确 (4 个等级)",
+          "passed": true
+        },
+        {
+          "item": "测试覆盖充分 (9 个测试文件)",
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "strengths": [
+    {
+      "dimension": "复用与确定性",
+      "text": "信号同义词映射 (signal-synonyms.json) 支持扩展，无需修改代码"
+    },
+    {
+      "dimension": "上下文效率",
+      "text": "references 文件职责单一，每个文件聚焦一个维度"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "输出信号按独立信号评分而非全或无，更科学"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "任务完成率作为独立指标报告，不混淆核心维度"
+    },
+    {
+      "dimension": "触发质量",
+      "text": "支持远程 URL 和本地路径两种候选类型，适应性强"
+    },
+    {
+      "dimension": "路由清晰度",
+      "text": "有明确的\"候选无效时停止\"的防护机制"
+    },
+    {
+      "dimension": "上下文效率",
+      "text": "signal-synonyms.json 实现配置化扩展"
+    },
+    {
+      "dimension": "复用与确定性",
+      "text": "输出信号按独立信号评分，避免全或无的粗糙判定"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "任务完成率作为独立指标，不混淆核心维度计算"
+    }
+  ],
+  "weaknesses": [
+    {
+      "dimension": "验证强度",
+      "text": "多模型鲁棒性测试需要手动配置，未自动化"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "多模型鲁棒性需要手动配置多个模型，未实现自动轮询"
+    },
+    {
+      "dimension": "复用与确定性",
+      "text": "部分脚本如 claude_cli_executor.py 耦合特定工具"
+    }
+  ],
+  "session_id": "eval-skill-benchmark-1775713910255"
+}

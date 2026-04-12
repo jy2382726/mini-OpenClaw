@@ -1,5 +1,6 @@
 """Global configuration management — JSON-based persistence with TTL cache."""
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -7,10 +8,9 @@ from typing import Any
 
 CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
 
-# 配置缓存：避免每次请求都读磁盘解析 JSON
 _cache: dict[str, Any] | None = None
 _cache_ts: float = 0.0
-_CACHE_TTL: float = 30.0  # 缓存有效期 30 秒
+_CACHE_TTL: float = 30.0
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "rag_mode": False,
@@ -78,13 +78,13 @@ def load_config() -> dict[str, Any]:
         return _cache
 
     if not CONFIG_FILE.exists():
-        _cache = json.loads(json.dumps(_DEFAULT_CONFIG))
+        _cache = copy.deepcopy(_DEFAULT_CONFIG)
     else:
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             _cache = _deep_merge(_DEFAULT_CONFIG, data)
         except Exception:
-            _cache = json.loads(json.dumps(_DEFAULT_CONFIG))
+            _cache = copy.deepcopy(_DEFAULT_CONFIG)
     _cache_ts = now
     return _cache
 

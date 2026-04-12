@@ -182,12 +182,6 @@ class MemoryConsolidator:
         union = words_a | words_b
         return len(intersection) / len(union) if union else 0.0
 
-    def _merge_group(self, group: MemoryGroup) -> None:
-        """合并一组重复记忆（立即删除版，向后兼容）。"""
-        deletes = self._merge_group_deferred(group)
-        for mem_id in deletes:
-            self._mgr.delete(mem_id)
-
     def _merge_group_deferred(self, group: MemoryGroup) -> list[str]:
         """合并一组重复记忆，返回待删除 ID 列表（延迟删除）。
 
@@ -249,20 +243,6 @@ class MemoryConsolidator:
 
         return conflicts
 
-    def _auto_resolve(self, conflicts: list[ConflictAction]) -> list[ConflictAction]:
-        """自动解决冲突：时间优先，保留更新的记忆（立即删除版）。"""
-        resolved: list[ConflictAction] = []
-        _unused: list[str] = []
-        for conflict in self._auto_resolve_deferred(conflicts, _unused):
-            resolved.append(conflict)
-        # 立即执行删除
-        for mem_id in _unused:
-            try:
-                self._mgr.delete(mem_id)
-            except Exception:
-                pass
-        return resolved
-
     def _auto_resolve_deferred(
         self, conflicts: list[ConflictAction], pending_deletes: list[str]
     ) -> list[ConflictAction]:
@@ -277,14 +257,6 @@ class MemoryConsolidator:
                 resolved.append(conflict)
 
         return resolved
-
-    def _expire_stale(self, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """清理确认过期的记忆（立即删除版）。"""
-        expired_ids = self._expire_stale_deferred(memories)
-        expired = [m for m in memories if m.get("id") in set(expired_ids)]
-        for mem_id in expired_ids:
-            self._mgr.delete(mem_id)
-        return expired
 
     def _expire_stale_deferred(self, memories: list[dict[str, Any]]) -> list[str]:
         """清理确认过期的记忆（延迟删除版），返回待删除 ID 列表。
