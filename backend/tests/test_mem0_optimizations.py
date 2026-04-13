@@ -99,8 +99,12 @@ class TestExtractionModel(unittest.TestCase):
 
     @patch("graph.mem0_manager.get_mem0_config")
     @patch("graph.mem0_manager.load_config")
-    def test_enable_thinking_false_passes_extra_body(self, mock_load_config, mock_get_mem0_config):
-        """enable_thinking=false 时传递 extra_body 参数。"""
+    def test_enable_thinking_false_patches_llm(self, mock_load_config, mock_get_mem0_config):
+        """enable_thinking=false 时通过 post-init patch 注入，而非配置参数。
+
+        mem0 的 OpenAIConfig 不支持 extra_body，所以实现改为初始化后
+        _patch_disable_thinking() 包装 generate_response 方法。
+        """
         mock_get_mem0_config.return_value = {
             "extraction_model": {
                 "model": "qwen3.5-flash",
@@ -118,19 +122,28 @@ class TestExtractionModel(unittest.TestCase):
         from graph.mem0_manager import Mem0Manager
         mgr = Mem0Manager()
 
+        mock_memory = MagicMock()
+        mock_llm = MagicMock()
+        mock_llm.generate_response = MagicMock(return_value="test")
+        mock_memory.llm = mock_llm
+
         captured_config = {}
         def mock_from_config(cfg):
             nonlocal captured_config
             captured_config = cfg
-            return MagicMock()
+            return mock_memory
 
         with patch.dict("sys.modules", {"mem0": MagicMock()}):
             with patch("mem0.Memory") as MockMem:
                 MockMem.from_config = mock_from_config
                 mgr.initialize(Path("/tmp/test_mem0"))
 
-        self.assertIn("extra_body", captured_config["llm"]["config"])
-        self.assertEqual(captured_config["llm"]["config"]["extra_body"], {"enable_thinking": False})
+        # 验证：配置中不应有 extra_body（mem0 不支持）
+        self.assertNotIn("extra_body", captured_config["llm"]["config"])
+
+        # 验证：generate_response 已被 patch（不再是原来的 MagicMock）
+        # patch 后是闭包函数，调用时会自动注入 extra_body
+        self.assertFalse(isinstance(mock_llm.generate_response, MagicMock))
 
 
 class TestThreadPool(unittest.TestCase):

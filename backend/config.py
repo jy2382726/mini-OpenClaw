@@ -35,6 +35,41 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "compression": {
         "ratio": 0.5,
     },
+    "summary_model": {
+        "model": "qwen-turbo",
+        "temperature": 0,
+    },
+    "middleware": {
+        "tool_output_budget": {
+            "enabled": True,
+            "budgets": {
+                "terminal": 2000,
+                "python_repl": 1500,
+                "fetch_url": 3000,
+                "read_file": 2000,
+                "search_knowledge": 1000,
+            },
+        },
+        "summarization": {
+            "enabled": True,
+            "trigger_tokens": 8000,
+            "keep_messages": 10,
+        },
+        "tool_filter": {
+            "enabled": True,
+        },
+        "tool_call_limit": {
+            "enabled": True,
+            "limits": {
+                "terminal": 10,
+                "python_repl": 5,
+            },
+        },
+    },
+    "features": {
+        "task_state": True,
+        "unified_memory": True,
+    },
     "mem0": {
         "enabled": False,
         "mode": "legacy",  # "legacy" | "mem0" | "hybrid"
@@ -120,6 +155,22 @@ def get_mem0_config() -> dict[str, Any]:
     return _deep_merge(defaults, mem0_cfg)
 
 
+def get_middleware_config() -> dict[str, Any]:
+    """获取中间件配置，始终返回完整默认值。"""
+    config = load_config()
+    defaults = _DEFAULT_CONFIG["middleware"]
+    mw_cfg = config.get("middleware", {})
+    return _deep_merge(defaults, mw_cfg)
+
+
+def get_features_config() -> dict[str, Any]:
+    """获取功能开关配置。"""
+    config = load_config()
+    defaults = _DEFAULT_CONFIG["features"]
+    feat_cfg = config.get("features", {})
+    return _deep_merge(defaults, feat_cfg)
+
+
 def set_mem0_config(updates: dict[str, Any]) -> None:
     """更新 mem0 配置（部分更新，自动合并）。"""
     config = load_config()
@@ -153,6 +204,9 @@ def get_settings_for_display() -> dict[str, Any]:
             **config.get("rag", {}),
         },
         "compression": config.get("compression", {}),
+        "summary_model": config.get("summary_model", _DEFAULT_CONFIG["summary_model"]),
+        "middleware": get_middleware_config(),
+        "features": get_features_config(),
         "mem0": config.get("mem0", _DEFAULT_CONFIG["mem0"]),
     }
     # Remove raw API keys from response
@@ -215,5 +269,21 @@ def update_settings(updates: dict[str, Any]) -> None:
         ):
             if key in mem0_update:
                 config["mem0"][key] = mem0_update[key]
+
+    if "middleware" in updates:
+        mw_update = updates["middleware"]
+        if "middleware" not in config:
+            config["middleware"] = {}
+        for mw_name, mw_vals in mw_update.items():
+            if isinstance(mw_vals, dict):
+                if mw_name not in config["middleware"]:
+                    config["middleware"][mw_name] = {}
+                config["middleware"][mw_name].update(mw_vals)
+
+    if "features" in updates:
+        feat_update = updates["features"]
+        if "features" not in config:
+            config["features"] = {}
+        config["features"].update(feat_update)
 
     save_config(config)

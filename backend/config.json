@@ -21,6 +21,41 @@
   "compression": {
     "ratio": 0.5
   },
+  "summary_model": {
+    "model": "qwen-turbo",
+    "temperature": 0
+  },
+  "middleware": {
+    "tool_output_budget": {
+      "enabled": true,
+      "budgets": {
+        "terminal": 2000,
+        "python_repl": 1500,
+        "fetch_url": 3000,
+        "read_file": 2000,
+        "search_knowledge": 1000
+      }
+    },
+    "summarization": {
+      "enabled": true,
+      "trigger_tokens": 8000,
+      "keep_messages": 10
+    },
+    "tool_filter": {
+      "enabled": true
+    },
+    "tool_call_limit": {
+      "enabled": true,
+      "limits": {
+        "terminal": 10,
+        "python_repl": 5
+      }
+    }
+  },
+  "features": {
+    "task_state": true,
+    "unified_memory": true
+  },
   "mem0": {
     "enabled": true,
     "mode": "mem0",

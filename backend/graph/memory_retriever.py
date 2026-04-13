@@ -1,4 +1,9 @@
-"""MemoryRetriever — 统一记忆检索接口（策略模式 + 防御性读取）。
+"""[DEPRECATED] 本模块已由 UnifiedMemoryRetriever (graph/unified_memory.py) 替代。
+
+原功能已合并到 UnifiedMemoryRetriever，支持 mem0/RAG/MEMORY.md 三源检索、
+降级容错和统一注入格式。保留本文件仅为向后兼容参考。
+
+MemoryRetriever — 统一记忆检索接口（策略模式 + 防御性读取）。
 
 提供三种检索策略：
 - LegacyRetriever: 封装现有 LlamaIndex MemoryIndexer

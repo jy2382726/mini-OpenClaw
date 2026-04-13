@@ -1,4 +1,4 @@
-"""Core Tools factory — returns all 7 tools for the Agent."""
+"""Core Tools factory — returns all core tools for the Agent."""
 
 from pathlib import Path
 from typing import List
@@ -12,10 +12,11 @@ from .read_file_tool import create_read_file_tool
 from .write_file_tool import create_write_file_tool
 from .search_knowledge_tool import create_search_knowledge_tool
 from .create_skill_version_tool import create_skill_version_tool
+from .update_task_tool import create_update_task_tool
 
 
 def get_all_tools(base_dir: Path) -> List[BaseTool]:
-    """Create and return all 7 core tools, sandboxed to base_dir."""
+    """Create and return all core tools, sandboxed to base_dir."""
     tools = [
         create_terminal_tool(base_dir),
         create_python_repl_tool(),
@@ -24,6 +25,7 @@ def get_all_tools(base_dir: Path) -> List[BaseTool]:
         create_write_file_tool(base_dir),
         create_search_knowledge_tool(base_dir),
         create_skill_version_tool(base_dir),
+        create_update_task_tool(),
     ]
 
     # 条件注册 mem0 工具（仅当 mem0 启用时）

@@ -16,16 +16,22 @@ BASE_DIR = Path(__file__).resolve().parent
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: scan skills, initialize agent, build memory index."""
-    from tools.skills_scanner import scan_skills
+    from graph.skill_registry import SkillRegistry
     from graph.agent import agent_manager
     from graph.memory_indexer import get_memory_indexer
 
-    scan_skills(BASE_DIR)
+    # 使用 SkillRegistry 替代旧的 scan_skills
+    registry = SkillRegistry.discover(BASE_DIR / "skills")
+
     agent_manager.initialize(BASE_DIR)
 
     # Initialize memory indexer for RAG mode
     indexer = get_memory_indexer(BASE_DIR)
     indexer.rebuild_index()
+
+    # 初始化统一记忆检索器
+    from graph.unified_memory import get_unified_retriever
+    unified_retriever = get_unified_retriever(BASE_DIR)
 
     # 条件初始化 mem0 记忆系统（失败不阻塞启动）
     try:
@@ -36,6 +42,8 @@ async def lifespan(app: FastAPI):
             from graph.memory_buffer import get_memory_buffer
 
             mem0_mgr = get_mem0_manager(BASE_DIR)
+            # 将 mem0 客户端注入统一检索器
+            unified_retriever.set_mem0_client(mem0_mgr)
             # 恢复缓冲区（从持久化文件）
             buffer = get_memory_buffer(BASE_DIR)
             if buffer.pending_count > 0:

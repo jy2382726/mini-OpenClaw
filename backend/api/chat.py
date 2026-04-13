@@ -86,7 +86,7 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
         history = session_manager.load_session_for_agent(session_id)
         is_first_message = len(history) == 0
 
-        async for event in agent_manager.astream(message, history):
+        async for event in agent_manager.astream(message, history, session_id=session_id):
             event_type = event.get("type", "unknown")
 
             if event_type == "retrieval":

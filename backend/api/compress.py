@@ -1,4 +1,9 @@
-"""POST /api/sessions/{session_id}/compress — Compress conversation history."""
+"""POST /api/sessions/{session_id}/compress — Compress conversation history.
+
+⚠️ DEPRECATED: 此模块已被 LangChain SummarizationMiddleware 自动摘要替代。
+中间件在每次模型调用前自动检查 token 数并触发结构化摘要，
+无需前端手动触发。此接口保留作为备用回退，后续版本将移除。
+"""
 
 import os
 import traceback
