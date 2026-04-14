@@ -5,11 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from config import load_config, get_mem0_config, get_features_config
+from config import load_config, get_mem0_config, get_features_config, create_auxiliary_llm
 from graph.prompt_builder import build_stable_prefix, build_dynamic_prefix
-from graph.session_manager import session_manager, COMPRESSED_CONTEXT_PREFIX
+from graph.session_manager import session_manager
 from tools import get_all_tools
 
 
@@ -23,6 +23,7 @@ class AgentManager:
         self._write_executor = ThreadPoolExecutor(max_workers=4)
         self._skill_registry = None  # 缓存 SkillRegistry 实例
         self._checkpointer = None  # 跨请求共享的 checkpointer
+        self._session_repo = None  # SessionRepository（与 checkpointer 共享连接）
         self._db_path: str | None = None  # SQLite 数据库路径（懒加载）
 
     def initialize(self, base_dir: Path) -> None:
@@ -57,14 +58,26 @@ class AgentManager:
         print(f"🤖 Agent initialized with {len(self._tools)} tools (model: {model})")
 
     async def _ensure_checkpointer(self):
-        """懒加载 AsyncSqliteSaver（需要异步创建 aiosqlite 连接）。"""
+        """懒加载 AsyncSqliteSaver（需要异步创建 aiosqlite 连接）。
+
+        同时初始化 sessions 元数据表，供 SessionRepository 使用。
+        """
         if self._checkpointer is None and self._db_path:
             import aiosqlite
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from graph.session_repository import SessionRepository
 
             conn = await aiosqlite.connect(self._db_path)
             self._checkpointer = AsyncSqliteSaver(conn)
+            # 初始化 sessions 元数据表
+            self._session_repo = SessionRepository(conn)
+            await self._session_repo.initialize()
         return self._checkpointer
+
+    async def get_session_repo(self):
+        """获取 SessionRepository 实例（确保 checkpointer 已初始化）。"""
+        await self._ensure_checkpointer()
+        return self._session_repo
 
     def _refresh_llm_if_needed(self):
         """Re-create LLM if config.json settings have changed since last init."""
@@ -121,28 +134,39 @@ class AgentManager:
         """构建四层中间件链：截断 → 摘要 → 工具过滤 → 限流。
 
         每层通过 config.json 的 middleware 配置段独立开关。
+        所有阈值基于 context_window 比例计算，切换模型后自动适应。
         """
-        from config import get_middleware_config
+        from config import get_middleware_config, get_context_window
         from graph.middleware import ToolOutputBudgetMiddleware, ContextAwareToolFilter
         from langchain.agents.middleware import SummarizationMiddleware, ToolCallLimitMiddleware
 
         mw_cfg = get_middleware_config()
+        context_window = get_context_window()
         middleware = []
 
-        # 第 1 层：前置截断超大工具输出
+        # 第 1 层：渐进式工具输出压缩
         if mw_cfg.get("tool_output_budget", {}).get("enabled", True):
-            budgets = mw_cfg.get("tool_output_budget", {}).get("budgets")
-            middleware.append(ToolOutputBudgetMiddleware(budgets=budgets))
+            tob_cfg = mw_cfg.get("tool_output_budget", {})
+            budgets = tob_cfg.get("budgets")
+            middleware.append(ToolOutputBudgetMiddleware(
+                budgets=budgets,
+                context_window=context_window,
+                safe_ratio=tob_cfg.get("safe_ratio", 0.25),
+                pressure_ratio=tob_cfg.get("pressure_ratio", 0.45),
+                base_dir=self._base_dir / "sessions" if self._base_dir else None,
+            ))
 
         # 第 2 层：自动摘要（使用轻量模型）
         if mw_cfg.get("summarization", {}).get("enabled", True):
             summary_llm = self._create_summary_llm()
             if summary_llm:
                 sum_cfg = mw_cfg.get("summarization", {})
+                # trigger_tokens 联动上下文窗口比例（默认 60%）
+                trigger_tokens = int(context_window * 0.6)
                 middleware.append(
                     SummarizationMiddleware(
                         model=summary_llm,
-                        trigger=("tokens", sum_cfg.get("trigger_tokens", 8000)),
+                        trigger=("tokens", trigger_tokens),
                         keep=("messages", sum_cfg.get("keep_messages", 10)),
                     )
                 )
@@ -168,39 +192,11 @@ class AgentManager:
         return middleware
 
     def _create_summary_llm(self):
-        """创建用于摘要的轻量 LLM 实例。
+        """创建用于摘要的辅助 LLM 实例。
 
-        预检查 API key 是否可用，避免懒初始化延迟报错。
+        委托给统一的 create_auxiliary_llm() 工厂函数。
         """
-        from langchain_openai import ChatOpenAI
-
-        config = load_config()
-        summary_cfg = config.get("summary_model", {})
-        model = summary_cfg.get("model", "qwen-turbo")
-
-        # 复用主模型的 API 配置
-        llm_config = config.get("llm", {})
-        api_key = llm_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
-        api_base = llm_config.get("base_url") or os.getenv(
-            "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        )
-        temperature = summary_cfg.get("temperature", 0)
-
-        # 预检查：无 API key 时跳过摘要模型创建
-        if not api_key:
-            print("⚠️ 摘要模型跳过：未配置 API key，将跳过自动摘要")
-            return None
-
-        try:
-            return ChatOpenAI(
-                model=model,
-                api_key=api_key,
-                base_url=api_base,
-                temperature=temperature,
-            )
-        except Exception as e:
-            print(f"⚠️ 摘要模型创建失败（将跳过自动摘要）: {e}")
-            return None
+        return create_auxiliary_llm()
 
     async def _summarize_goal(self, message: str) -> str:
         """使用轻量 LLM 将用户消息总结为简洁的任务目标。
@@ -248,65 +244,8 @@ class AgentManager:
         except Exception as e:
             print(f"⚠️ TaskState 写入 checkpoint 失败: {e}")
 
-    # 安全上限：防止极端情况下历史消息爆炸。
-    # 上下文管理已由 SummarizationMiddleware 接管，此值仅作为兜底保护。
-    MAX_HISTORY_MESSAGES = 50
-
-    # Tool-calling reminder injected as a user message when conversation is long.
-    # Using HumanMessage (not AIMessage) so the model treats it as an instruction,
-    # not as something it previously said.
-    TOOL_REMINDER = (
-        "[系统提醒] 请记住：你必须使用工具来完成任务。"
-        "需要读取文件时调用 read_file，需要执行命令时调用 terminal，"
-        "需要写入文件时调用 write_file。"
-        "禁止在文本中描述操作而不实际调用工具。"
-    )
-
-    def _build_messages(self, user_message: str, history: list[dict[str, Any]]) -> list:
-        """Convert session history + new message into LangChain messages.
-
-        SummarizationMiddleware 在模型调用前自动管理上下文长度，
-        此方法仅做消息格式转换、压缩上下文首条保护和安全上限兜底。
-        """
-        # 安全上限兜底
-        truncated = list(history)
-        if len(truncated) > self.MAX_HISTORY_MESSAGES:
-            # Keep compressed context (first message if it exists) + recent messages
-            first = truncated[0]
-            if COMPRESSED_CONTEXT_PREFIX in first.get("content", ""):
-                truncated = [first] + truncated[-(self.MAX_HISTORY_MESSAGES - 1):]
-            else:
-                truncated = truncated[-self.MAX_HISTORY_MESSAGES:]
-
-        # Ensure truncated history doesn't start with assistant (except summary).
-        # Drop leading assistant messages to maintain proper conversation structure.
-        while (
-            truncated
-            and truncated[0].get("role") == "assistant"
-            and COMPRESSED_CONTEXT_PREFIX not in truncated[0].get("content", "")
-        ):
-            truncated = truncated[1:]
-
-        messages = []
-        for msg in truncated:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-
-        # Inject tool reminder as HumanMessage when conversation is long (>= 6 rounds).
-        # Paired with an AIMessage acknowledgment to maintain proper alternation.
-        if len(history) >= 12:
-            messages.append(HumanMessage(content=self.TOOL_REMINDER))
-            messages.append(AIMessage(content="明白，我会使用工具来执行操作。"))
-
-        messages.append(HumanMessage(content=user_message))
-        return messages
-
     async def astream(
-        self, message: str, history: list[dict[str, Any]], session_id: str = "default"
+        self, message: str, history: list[dict[str, Any]] | None = None, session_id: str = "default"
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream agent response with token-level and node-level events.
 
@@ -378,8 +317,8 @@ class AgentManager:
             agent = self._build_agent()
             thread_config = {"configurable": {"thread_id": session_id}}
 
-        # Build messages from history (no longer augment with RAG as assistant message)
-        messages = self._build_messages(message, history)
+        # Build messages: checkpoint 自动恢复历史，仅传当前 user message
+        messages = [HumanMessage(content=message)]
 
         # Zone 3: 动态内容注入为 SystemMessage，位于当前用户消息之前
         has_active_steps = _has_in_progress_steps(task_state_dict)
@@ -489,11 +428,10 @@ class AgentManager:
         # 确保 checkpointer 已初始化（懒加载）
         await self._ensure_checkpointer()
 
-        history = session_manager.load_session_for_agent(session_id)
+        features = get_features_config()
 
         # 统一记忆检索（与 astream 保持一致）
         rag_context = ""
-        features = get_features_config()
         if self._base_dir and features.get("unified_memory", True):
             from graph.unified_memory import get_unified_retriever
 
@@ -533,7 +471,8 @@ class AgentManager:
             agent = self._build_agent()
             thread_config = {"configurable": {"thread_id": session_id}}
 
-        messages = self._build_messages(message, history)
+        # checkpoint 自动恢复历史，仅传当前 user message
+        messages = [HumanMessage(content=message)]
 
         # Zone 3: 动态内容注入为 SystemMessage
         has_active_steps = _has_in_progress_steps(task_state_dict)
@@ -553,10 +492,7 @@ class AgentManager:
         final_messages = result.get("messages", [])
         for msg in reversed(final_messages):
             if hasattr(msg, "content") and msg.type == "ai" and msg.content:
-                response = msg.content
-                session_manager.save_message(session_id, "user", message)
-                session_manager.save_message(session_id, "assistant", response)
-                return response
+                return msg.content
         return "No response generated."
 
 

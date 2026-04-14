@@ -40,6 +40,7 @@ async def set_rag_mode_endpoint(request: RagModeRequest):
 
 class SettingsUpdateRequest(BaseModel):
     llm: Optional[dict[str, Any]] = None
+    auxiliary_model: Optional[dict[str, Any]] = None
     embedding: Optional[dict[str, Any]] = None
     rag: Optional[dict[str, Any]] = None
     compression: Optional[dict[str, Any]] = None

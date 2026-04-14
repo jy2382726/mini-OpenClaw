@@ -1,4 +1,12 @@
-"""中间件单元测试 — ToolOutputBudgetMiddleware + ContextAwareToolFilter。"""
+"""中间件单元测试 — ToolOutputBudgetMiddleware 渐进式压缩 + ContextAwareToolFilter。
+
+测试覆盖：
+- 5.1 渐进式逻辑（不处理 → 标准截断 → 短截断）
+- 5.2 当前轮次保护机制
+- 5.3 上下文窗口比例计算
+- 5.4 归档能力
+- 5.5 现有测试兼容性（辅助函数、ContextAwareToolFilter、中间件链）
+"""
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -13,7 +21,557 @@ from graph.middleware import (
 )
 
 
-# ── 辅助函数测试 ──
+# ── 辅助工厂函数 ──
+
+
+def _make_middleware(
+    context_window: int = 131072,
+    safe_ratio: float = 0.25,
+    pressure_ratio: float = 0.45,
+    base_dir: str | None = None,
+) -> ToolOutputBudgetMiddleware:
+    """构建测试用 ToolOutputBudgetMiddleware 实例。"""
+    return ToolOutputBudgetMiddleware(
+        context_window=context_window,
+        safe_ratio=safe_ratio,
+        pressure_ratio=pressure_ratio,
+        base_dir=base_dir,
+    )
+
+
+class MockRuntime:
+    """最小化的 mock runtime。"""
+    pass
+
+
+def _build_tool_call_msg(tc_id: str, tool_name: str = "terminal") -> AIMessage:
+    """构建带 tool_calls 的 AIMessage。"""
+    return AIMessage(
+        content="",
+        tool_calls=[{"id": tc_id, "name": tool_name, "args": {"command": "ls"}}],
+    )
+
+
+def _build_tool_result_msg(
+    tc_id: str, content: str, tool_name: str = "terminal", msg_id: str | None = None
+) -> ToolMessage:
+    """构建 ToolMessage。"""
+    return ToolMessage(
+        content=content,
+        name=tool_name,
+        tool_call_id=tc_id,
+        id=msg_id or f"msg_{tc_id}",
+    )
+
+
+def _padding_tokens(middleware: ToolOutputBudgetMiddleware, target_tokens: int) -> str:
+    """生成填充字符串，使 _estimate_tokens 粗略返回 target_tokens。
+
+    1 token ≈ 4 字符，所以需要 target_tokens * 4 个字符。
+    """
+    return "P" * (target_tokens * 4)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5.1 渐进式逻辑：不处理 → 标准截断 → 短截断
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestProgressiveCompression:
+    """渐进式压缩策略测试：验证三个水位级别的行为。"""
+
+    @pytest.mark.asyncio
+    async def test_level0_no_compression_when_safe(self):
+        """Level 0：上下文 < safe_ratio 时不处理任何工具输出。"""
+        # context_window=50000, safe=12500 tokens
+        mw = _make_middleware(context_window=50000)
+        # 10000 tokens（低于 safe_ratio 12500）
+        padding = _padding_tokens(mw, 10000)
+        over_budget = "X" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 1000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is None, "上下文宽裕时不应压缩"
+
+    @pytest.mark.asyncio
+    async def test_level1_standard_truncation(self):
+        """Level 1：safe_ratio ≤ 上下文 < pressure_ratio → 标准截断（保护 3 组）。
+
+        需要至少 4 组工具调用，使第 4 组（最早）不在 3 组保护范围内。
+        """
+        # context_window=50000, safe=12500, pressure=22500
+        # archive_threshold = 50000 * 0.05 * 4 = 10000 chars
+        mw = _make_middleware(context_window=50000)
+        over_budget = "A" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 2000)  # ~2500 tokens
+
+        # padding + 4 组工具输出 ≈ 15000 + 2500 = 17500 tokens（Level 1 区间）
+        padding = _padding_tokens(mw, 15000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 第 4 组（最早，不在 3 组保护范围 → 被压缩）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget, msg_id="g4_earliest"),
+                # 第 3 组（受保护）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="g3"),
+                # 第 2 组（受保护）
+                _build_tool_call_msg("tc3"),
+                _build_tool_result_msg("tc3", "OK", msg_id="g2"),
+                # 第 1 组（受保护）
+                _build_tool_call_msg("tc4"),
+                _build_tool_result_msg("tc4", "OK", msg_id="g1"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None, "上下文紧张时应触发压缩"
+
+        msgs = result["messages"]
+        # 最早组被截断
+        assert msgs[2].id == "g4_earliest"
+        assert "省略约" in msgs[2].content
+        # 受保护的 3 组不变
+        assert msgs[4].content == "OK"
+        assert msgs[6].content == "OK"
+        assert msgs[8].content == "OK"
+
+    @pytest.mark.asyncio
+    async def test_level2_aggressive_truncation(self):
+        """Level 2：上下文 ≥ pressure_ratio → 短截断（保护 1 组）。"""
+        # context_window=50000, safe=12500, pressure=22500
+        # archive_threshold = 50000 * 0.05 * 4 = 10000 chars
+        # terminal budget = 2000 * 4 = 8000 chars（< archive_threshold）
+        mw = _make_middleware(context_window=50000)
+        over_budget = "B" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 2000)  # ~2500 tokens
+
+        # padding + 2 组 ≈ 23000 + 2500 = 25500 tokens（超过 pressure 22500）
+        padding = _padding_tokens(mw, 23000)
+
+        # 两组：early 不保护（aggressive 只保护最近 1 组），latest 保护
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                _build_tool_call_msg("tc_early"),
+                _build_tool_result_msg("tc_early", over_budget, msg_id="early_id"),
+                _build_tool_call_msg("tc_latest"),
+                _build_tool_result_msg("tc_latest", over_budget, msg_id="latest_id"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        msgs = result["messages"]
+        # 早期工具输出被压缩
+        early_msg = msgs[2]
+        assert isinstance(early_msg, ToolMessage)
+        assert early_msg.id == "early_id"
+        assert "省略约" in early_msg.content
+
+        # 最新工具输出被保护（未压缩）
+        latest_msg = msgs[4]
+        assert isinstance(latest_msg, ToolMessage)
+        assert latest_msg.id == "latest_id"
+        assert latest_msg.content == over_budget
+
+    @pytest.mark.asyncio
+    async def test_non_tool_messages_never_touched(self):
+        """非 ToolMessage 在任何水位都不受影响。"""
+        mw = _make_middleware(context_window=50000)
+        padding = _padding_tokens(mw, 30000)
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                AIMessage(content="这是 AI 回复"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_never_truncated(self):
+        """未知工具名在任何水位都不被截断。"""
+        mw = _make_middleware(context_window=50000)
+        padding = _padding_tokens(mw, 30000)
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                ToolMessage(content="X" * 10000, name="unknown_tool", tool_call_id="u1"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is None, "未知工具名不在预算表中，不应被处理"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5.2 当前轮次保护机制
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestCurrentTurnProtection:
+    """验证最近 N 组工具输出不被压缩。"""
+
+    @pytest.mark.asyncio
+    async def test_protect_3_groups_in_safe_zone(self):
+        """Level 1 保护最近 3 组工具输出，第 4 组被压缩。
+
+        受保护组即使超预算也不被压缩（验证保护机制优先于预算检查）。
+        """
+        # context_window=80000, safe=20000, pressure=36000
+        mw = _make_middleware(context_window=80000)
+        over_budget = "Z" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 500)  # ~2500 tokens
+
+        # padding + 4 组 over_budget ≈ 25000 + 10000 = 35000 tokens → Level 1
+        padding = _padding_tokens(mw, 25000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 第 4 组（最早，不在 3 组保护范围 → 被压缩）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget, msg_id="g1"),
+                # 第 3 组（受保护，即使超预算）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", over_budget, msg_id="g2"),
+                # 第 2 组（受保护）
+                _build_tool_call_msg("tc3"),
+                _build_tool_result_msg("tc3", over_budget, msg_id="g3"),
+                # 第 1 组（受保护）
+                _build_tool_call_msg("tc4"),
+                _build_tool_result_msg("tc4", over_budget, msg_id="g4"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        msgs = result["messages"]
+        # 第 4 组（最早）被压缩
+        assert "省略约" in msgs[2].content
+        # 第 3、2、1 组被保护（即使超预算）
+        assert msgs[4].content == over_budget  # g2
+        assert msgs[6].content == over_budget  # g3
+        assert msgs[8].content == over_budget  # g4
+
+    @pytest.mark.asyncio
+    async def test_protect_1_group_in_pressure_zone(self):
+        """Level 2 仅保护最近 1 组工具输出。"""
+        # context_window=50000, pressure=22500
+        mw = _make_middleware(context_window=50000)
+        padding = _padding_tokens(mw, 23000)
+        over_budget = "Y" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 500)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 第 3 组（应被压缩）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget, msg_id="g1"),
+                # 第 2 组（应被压缩）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", over_budget, msg_id="g2"),
+                # 第 1 组（受保护）
+                _build_tool_call_msg("tc3"),
+                _build_tool_result_msg("tc3", over_budget, msg_id="g3"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        msgs = result["messages"]
+        assert "省略约" in msgs[2].content  # g1 被压缩
+        assert "省略约" in msgs[4].content  # g2 被压缩
+        assert msgs[6].content == over_budget  # g3 受保护
+
+    @pytest.mark.asyncio
+    async def test_protect_zero_groups(self):
+        """n=0 时保护集合为空（所有工具输出均可被压缩）。"""
+        mw = _make_middleware(context_window=10000)
+        protected = mw._get_protected_tool_ids(
+            [
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", "out"),
+            ],
+            n=0,
+        )
+        assert protected == set()
+
+    @pytest.mark.asyncio
+    async def test_protect_more_groups_than_exist(self):
+        """保护 N 组但消息中不足 N 组时，全部保护。"""
+        mw = _make_middleware(context_window=10000)
+        msgs = [
+            _build_tool_call_msg("tc1"),
+            _build_tool_result_msg("tc1", "out", msg_id="only_one"),
+        ]
+        protected = mw._get_protected_tool_ids(msgs, n=5)
+        assert "only_one" in protected
+
+    @pytest.mark.asyncio
+    async def test_multi_tool_calls_in_one_group(self):
+        """一组 AIMessage(tool_calls) 可含多个 tool_call，对应多个 ToolMessage。"""
+        mw = _make_middleware(context_window=10000)
+
+        # 一条 AIMessage 含 2 个 tool_calls → 同一组
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "tc_a", "name": "terminal", "args": {}},
+                {"id": "tc_b", "name": "read_file", "args": {}},
+            ],
+        )
+        msgs = [
+            ai_msg,
+            _build_tool_result_msg("tc_a", "out_a", msg_id="id_a"),
+            _build_tool_result_msg("tc_b", "out_b", msg_id="id_b"),
+        ]
+        # 保护 1 组 → 两个 ToolMessage 都应被保护
+        protected = mw._get_protected_tool_ids(msgs, n=1)
+        assert "id_a" in protected
+        assert "id_b" in protected
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5.3 上下文窗口比例计算
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestContextWindowRatio:
+    """不同上下文窗口大小下的阈值自动适应。"""
+
+    @pytest.mark.asyncio
+    async def test_small_window_triggers_earlier(self):
+        """小窗口（32K）在较少 token 时就触发压缩。"""
+        # 32K 窗口: safe=8192, pressure=14745
+        # archive_threshold = 32768 * 0.05 * 4 = 6553 chars
+        # 需内容 > budget(8000 chars) 但 < archive_threshold → 不可能！
+        # 32K 窗口下 terminal 预算的 chars(8000) > archive_threshold(6553)
+        # 因此超预算的 terminal 输出会触发归档而非截断
+        mw = _make_middleware(context_window=32768)
+        over_budget = "S" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 500)  # ~2500 tokens
+
+        # padding + 2 组 ≈ 13000 + 2500 = 15500 > pressure → Level 2
+        padding = _padding_tokens(mw, 13000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget, msg_id="early"),
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="latest"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None, "32K 窗口应触发压缩"
+        # 32K 窗口下超预算内容必然触发归档（archive_threshold < budget）
+        assert "完整输出已归档到" in result["messages"][2].content
+
+    @pytest.mark.asyncio
+    async def test_large_window_stays_safe(self):
+        """大窗口（1M）在同样 token 数下不触发。"""
+        # 1M 窗口: safe=250000
+        mw = _make_middleware(context_window=1000000)
+        padding = _padding_tokens(mw, 9000)  # 远低于 safe
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", "X" * 10000),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is None, "1M 窗口 9000 tokens 应不触发"
+
+    @pytest.mark.asyncio
+    async def test_estimate_tokens_accuracy(self):
+        """_estimate_tokens 粗略估算正确。"""
+        mw = _make_middleware()
+        # 1000 字符 ≈ 250 tokens
+        msgs = [HumanMessage(content="A" * 1000)]
+        assert mw._estimate_tokens(msgs) == 250
+
+        # 多条消息累加
+        msgs = [
+            HumanMessage(content="A" * 400),  # 100 tokens
+            AIMessage(content="B" * 800),     # 200 tokens
+        ]
+        assert mw._estimate_tokens(msgs) == 300
+
+    @pytest.mark.asyncio
+    async def test_custom_ratios(self):
+        """自定义 safe_ratio/pressure_ratio 影响触发阈值。"""
+        # 极低 safe_ratio=0.1，pressure_ratio=0.2
+        # context_window=10000, safe=1000, pressure=2000
+        mw = _make_middleware(context_window=10000, safe_ratio=0.1, pressure_ratio=0.2)
+        over_budget = "C" * (TOOL_OUTPUT_BUDGETS["terminal"] * 4 + 500)  # ~2500 tokens
+
+        # padding + over_budget ≈ 1100 + 2500 = 3600 > pressure=2000 → Level 2
+        padding = _padding_tokens(mw, 1100)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 早期组（不在 1 组保护范围 → 被压缩）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget, msg_id="early"),
+                # 最新组（受保护）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="latest"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None, "低 safe_ratio 应触发压缩"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5.4 归档能力
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestArchiving:
+    """超大输出归档 + 文件引用测试。"""
+
+    @pytest.mark.asyncio
+    async def test_archive_large_output(self, tmp_path):
+        """单条输出超过 archive_ratio 触发归档。"""
+        # context_window=50000, archive_threshold = 50000 * 0.05 * 4 = 10000 chars
+        mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
+        huge_output = "H" * 15000  # > archive_threshold, ~3750 tokens
+
+        # padding + 2 组 ≈ 23000 + 3750 = 26750 > pressure=22500 → Level 2, protect 1
+        padding = _padding_tokens(mw, 23000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 早期组（不在 1 组保护范围 → 被归档）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", huge_output, msg_id="archive_me"),
+                # 最新组（受保护）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="latest"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        tool_msg = result["messages"][2]
+        assert isinstance(tool_msg, ToolMessage)
+        assert tool_msg.id == "archive_me"
+        # 内容应包含归档引用
+        assert "完整输出已归档到" in tool_msg.content
+        assert "sessions/archive/tool_terminal_" in tool_msg.content
+        assert "可用 read_file 查看" in tool_msg.content
+
+        # 归档文件存在
+        archive_dir = tmp_path / "archive"
+        assert archive_dir.exists()
+        archive_files = list(archive_dir.glob("tool_terminal_*.txt"))
+        assert len(archive_files) == 1
+        assert archive_files[0].read_text(encoding="utf-8") == huge_output
+
+    @pytest.mark.asyncio
+    async def test_archive_priority_over_truncation(self, tmp_path):
+        """归档优先于普通截断：内容同时超 budget 和超 archive_threshold 时触发归档。"""
+        # context_window=10000, archive_threshold = 10000 * 0.05 * 4 = 2000 chars
+        mw = _make_middleware(context_window=10000, base_dir=str(tmp_path))
+        # 内容 = 8000 chars > archive_threshold(2000) → 归档
+        huge_output = "A" * 8000  # ~2000 tokens
+
+        # padding + 2 组 ≈ 5000 + 2000 = 7000 > pressure=4500 → Level 2, protect 1
+        padding = _padding_tokens(mw, 5000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 早期组（不在 1 组保护范围 → 被归档）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", huge_output, msg_id="a1"),
+                # 最新组（受保护）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="latest"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        tool_msg = result["messages"][2]
+        # 归档而非截断
+        assert "完整输出已归档到" in tool_msg.content
+
+    @pytest.mark.asyncio
+    async def test_archive_file_content_recoverable(self, tmp_path):
+        """归档文件可通过 read_file 恢复完整内容。"""
+        mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
+        # archive_threshold = 50000 * 0.05 * 4 = 10000 chars
+        # 确保 > archive_threshold：每行约 7 chars，1000 行 ≈ 7000 chars + 5000 = 12000 chars
+        original = ("Line %d\n" % 0) * 1000 + "X" * 5000  # ~12000 chars
+
+        padding = _padding_tokens(mw, 23000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", original, msg_id="recover"),
+                # 最新组（受保护）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="latest"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        # 读取归档文件验证内容一致
+        archive_files = list((tmp_path / "archive").glob("*.txt"))
+        assert len(archive_files) == 1
+        recovered = archive_files[0].read_text(encoding="utf-8")
+        assert recovered == original
+
+    @pytest.mark.asyncio
+    async def test_no_archive_when_under_threshold(self, tmp_path):
+        """内容低于 archive_threshold 时只截断不归档。"""
+        # context_window=50000, archive_threshold = 50000 * 0.05 * 4 = 10000 chars
+        mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
+        # terminal budget = 8000 chars，内容 9000 chars > budget 但 < archive_threshold
+        over_budget = "M" * 9000  # ~2250 tokens
+
+        # padding + 2 组 ≈ 23000 + 2250 = 25250 > pressure → Level 2, protect 1
+        padding = _padding_tokens(mw, 23000)
+
+        state = {
+            "messages": [
+                HumanMessage(content=padding),
+                # 早期组（不在保护范围 → 被截断）
+                _build_tool_call_msg("tc1"),
+                _build_tool_result_msg("tc1", over_budget, msg_id="no_archive"),
+                # 最新组（受保护）
+                _build_tool_call_msg("tc2"),
+                _build_tool_result_msg("tc2", "OK", msg_id="latest"),
+            ]
+        }
+        result = await mw.abefore_model(state, MockRuntime())
+        assert result is not None
+
+        tool_msg = result["messages"][2]
+        # 应该是截断而非归档
+        assert "完整输出已归档到" not in tool_msg.content
+        assert "省略约" in tool_msg.content
+
+        # 归档目录不存在（没有触发归档）
+        assert not (tmp_path / "archive").exists()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 辅助函数测试（保留）
+# ═══════════════════════════════════════════════════════════════
 
 
 class TestExceedsBudget:
@@ -33,11 +591,8 @@ class TestExceedsBudget:
 class TestTruncateWithSummary:
     def test_head_tail_preserved(self):
         budget = 100  # char_budget = 400, head=266, tail=133
-        head_len = 400 * 2 // 3  # 266
-        tail_len = 400 // 3  # 133
         content = "H" * 200 + "M" * 300 + "T" * 200  # 700 chars total
         result = _truncate_with_summary(content, budget)
-        # head 取 content[:266]，即 200 个 H + 66 个 M
         assert result.startswith("H" * 200)
         assert result.endswith("T" * 133)
         assert "省略约" in result
@@ -49,106 +604,9 @@ class TestTruncateWithSummary:
         assert "省略约 60 字符" in result
 
 
-# ── 中间件集成测试 ──
-
-
-class TestToolOutputBudgetMiddleware:
-    @pytest.fixture
-    def middleware(self):
-        return ToolOutputBudgetMiddleware()
-
-    @pytest.fixture
-    def mock_runtime(self):
-        class Runtime:
-            pass
-        return Runtime()
-
-    @pytest.mark.asyncio
-    async def test_truncate_tool_output_over_budget(self, middleware, mock_runtime):
-        """超过预算的 ToolMessage 被截断。"""
-        terminal_budget = TOOL_OUTPUT_BUDGETS["terminal"]
-        long_output = "X" * (terminal_budget * 4 + 1000)
-        state = {
-            "messages": [
-                HumanMessage(content="运行命令"),
-                AIMessage(content="", tool_calls=[{"id": "tc1", "name": "terminal", "args": {"command": "ls"}}]),
-                ToolMessage(content=long_output, name="terminal", tool_call_id="tc1"),
-            ]
-        }
-        result = await middleware.abefore_model(state, mock_runtime)
-        assert result is not None
-        tool_msg = result["messages"][2]
-        assert isinstance(tool_msg, ToolMessage)
-        assert "省略约" in tool_msg.content
-        assert len(tool_msg.content) < len(long_output)
-
-    @pytest.mark.asyncio
-    async def test_no_truncate_under_budget(self, middleware, mock_runtime):
-        """未超预算的 ToolMessage 不被截断。"""
-        short_output = "OK"
-        state = {
-            "messages": [
-                HumanMessage(content="运行命令"),
-                ToolMessage(content=short_output, name="terminal", tool_call_id="tc1"),
-            ]
-        }
-        result = await middleware.abefore_model(state, mock_runtime)
-        assert result is None  # 无变更
-
-    @pytest.mark.asyncio
-    async def test_non_tool_messages_untouched(self, middleware, mock_runtime):
-        """非 ToolMessage 不受影响。"""
-        state = {
-            "messages": [
-                HumanMessage(content="你好"),
-                AIMessage(content="你好！"),
-            ]
-        }
-        result = await middleware.abefore_model(state, mock_runtime)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_mixed_messages(self, middleware, mock_runtime):
-        """混合消息中只有超预算的 ToolMessage 被截断。"""
-        terminal_budget = TOOL_OUTPUT_BUDGETS["terminal"]
-        long_output = "Y" * (terminal_budget * 4 + 500)
-        state = {
-            "messages": [
-                HumanMessage(content="运行"),
-                ToolMessage(content=long_output, name="terminal", tool_call_id="tc1"),
-                AIMessage(content="结果已完成"),
-                ToolMessage(content="short", name="terminal", tool_call_id="tc2"),
-            ]
-        }
-        result = await middleware.abefore_model(state, mock_runtime)
-        assert result is not None
-        msgs = result["messages"]
-        assert len(msgs) == 4  # 消息数量不变
-        assert "省略约" in msgs[1].content  # 第一个 ToolMessage 被截断
-        assert msgs[3].content == "short"  # 第二个 ToolMessage 不变
-        assert isinstance(msgs[0], HumanMessage)  # HumanMessage 不变
-        assert isinstance(msgs[2], AIMessage)  # AIMessage 不变
-
-    @pytest.mark.asyncio
-    async def test_empty_messages(self, middleware, mock_runtime):
-        """空消息列表返回 None。"""
-        result = await middleware.abefore_model({"messages": []}, mock_runtime)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_unknown_tool_not_truncated(self, middleware, mock_runtime):
-        """未知工具名（不在预算表中）不被截断。"""
-        long_output = "Z" * 10000
-        state = {
-            "messages": [
-                ToolMessage(content=long_output, name="unknown_tool", tool_call_id="tc1"),
-            ]
-        }
-        result = await middleware.abefore_model(state, mock_runtime)
-        assert result is None  # 未知工具不做处理
-
-
-# ── ContextAwareToolFilter 测试 ──
+# ═══════════════════════════════════════════════════════════════
+# ContextAwareToolFilter 测试（保留）
+# ═══════════════════════════════════════════════════════════════
 
 
 class TestContextAwareToolFilter:
@@ -223,7 +681,6 @@ class TestContextAwareToolFilter:
             [HumanMessage(content="你好")],
         )
         async def handler(req):
-            # 过滤后的工具对象与原始对象相同（未被修改）
             for t in req.tools:
                 assert hasattr(t, "name")
             return "ok"
@@ -242,7 +699,9 @@ class TestContextAwareToolFilter:
         await filter_middleware.awrap_model_call(request, handler)
 
 
-# ── 中间件链构建测试 ──
+# ═══════════════════════════════════════════════════════════════
+# 中间件链构建测试（保留）
+# ═══════════════════════════════════════════════════════════════
 
 
 class TestMiddlewareChain:
@@ -253,7 +712,6 @@ class TestMiddlewareChain:
 
         mgr = AgentManager()
         mgr._base_dir = Path("/tmp")
-        # 无需初始化 LLM，只检查中间件构建逻辑
         middleware = mgr._build_middleware()
         assert isinstance(middleware, list)
         assert len(middleware) > 0
@@ -269,18 +727,15 @@ class TestMiddlewareChain:
         mgr._base_dir = Path("/tmp")
         middleware = mgr._build_middleware()
 
-        # 验证类型顺序
         type_order = [type(m).__name__ for m in middleware]
         assert "ToolOutputBudgetMiddleware" in type_order
         assert "ContextAwareToolFilter" in type_order
 
-        # ToolOutputBudgetMiddleware 必须在 SummarizationMiddleware 之前
         budget_idx = type_order.index("ToolOutputBudgetMiddleware")
         if "SummarizationMiddleware" in type_order:
             summary_idx = type_order.index("SummarizationMiddleware")
             assert budget_idx < summary_idx
 
-        # ContextAwareToolFilter 必须在 SummarizationMiddleware 之后
         filter_idx = type_order.index("ContextAwareToolFilter")
         if "SummarizationMiddleware" in type_order:
             summary_idx = type_order.index("SummarizationMiddleware")

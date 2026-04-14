@@ -15,10 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 class TestExtractionModel(unittest.TestCase):
     """方案一：独立轻量 LLM 模型配置。"""
 
+    @patch("graph.mem0_manager.get_auxiliary_model_config")
     @patch("graph.mem0_manager.get_mem0_config")
     @patch("graph.mem0_manager.load_config")
-    def test_extraction_model_overrides_main(self, mock_load_config, mock_get_mem0_config):
-        """配置了 extraction_model 时，mem0 使用独立模型而非主对话模型。"""
+    def test_extraction_model_overrides_main(self, mock_load_config, mock_get_mem0_config, mock_get_aux_config):
+        """配置了辅助模型时，mem0 使用辅助模型而非主对话模型。
+
+        迁移后模型名来自 get_auxiliary_model_config()，api_key 复用主模型配置，
+        max_tokens 仍从 mem0 extraction_model 读取。
+        """
+        mock_get_aux_config.return_value = {"model": "qwen3.5-flash", "temperature": 0}
         mock_get_mem0_config.return_value = {
             "extraction_model": {
                 "model": "qwen3.5-flash",
@@ -56,14 +62,22 @@ class TestExtractionModel(unittest.TestCase):
                 MockMem.from_config = mock_from_config
                 mgr.initialize(Path("/tmp/test_mem0"))
 
+        # 模型名来自 get_auxiliary_model_config()
         self.assertEqual(captured_config["llm"]["config"]["model"], "qwen3.5-flash")
-        self.assertEqual(captured_config["llm"]["config"]["api_key"], "sk-test-flash")
+        # api_key 复用主模型配置（llm.api_key）
+        self.assertEqual(captured_config["llm"]["config"]["api_key"], "sk-test-main")
+        # max_tokens 仍从 extraction_model 读取
         self.assertEqual(captured_config["llm"]["config"]["max_tokens"], 512)
 
+    @patch("graph.mem0_manager.get_auxiliary_model_config")
     @patch("graph.mem0_manager.get_mem0_config")
     @patch("graph.mem0_manager.load_config")
-    def test_no_extraction_model_uses_main(self, mock_load_config, mock_get_mem0_config):
-        """未配置 extraction_model 时，回退使用主对话模型。"""
+    def test_no_extraction_model_uses_auxiliary(self, mock_load_config, mock_get_mem0_config, mock_get_aux_config):
+        """未配置 extraction_model 时，使用辅助模型（而非主对话模型）。
+
+        迁移后模型名统一从 get_auxiliary_model_config() 获取。
+        """
+        mock_get_aux_config.return_value = {"model": "qwen3.5-flash", "temperature": 0}
         mock_get_mem0_config.return_value = {"extraction_model": {}}
         mock_load_config.return_value = {
             "llm": {
@@ -93,13 +107,16 @@ class TestExtractionModel(unittest.TestCase):
                 MockMem.from_config = mock_from_config
                 mgr.initialize(Path("/tmp/test_mem0"))
 
-        self.assertEqual(captured_config["llm"]["config"]["model"], "qwen3.5-plus")
-        self.assertEqual(captured_config["llm"]["config"]["max_tokens"], 8096)
+        # 模型名来自 get_auxiliary_model_config()，不再是主模型
+        self.assertEqual(captured_config["llm"]["config"]["model"], "qwen3.5-flash")
+        # max_tokens 默认 512（extraction_model 为空时）
+        self.assertEqual(captured_config["llm"]["config"]["max_tokens"], 512)
         self.assertNotIn("extra_body", captured_config["llm"]["config"])
 
+    @patch("graph.mem0_manager.get_auxiliary_model_config")
     @patch("graph.mem0_manager.get_mem0_config")
     @patch("graph.mem0_manager.load_config")
-    def test_enable_thinking_false_patches_llm(self, mock_load_config, mock_get_mem0_config):
+    def test_enable_thinking_false_patches_llm(self, mock_load_config, mock_get_mem0_config, mock_get_aux_config):
         """enable_thinking=false 时通过 post-init patch 注入，而非配置参数。
 
         mem0 的 OpenAIConfig 不支持 extra_body，所以实现改为初始化后
@@ -114,6 +131,7 @@ class TestExtractionModel(unittest.TestCase):
                 "enable_thinking": False,
             }
         }
+        mock_get_aux_config.return_value = {"model": "qwen3.5-flash", "temperature": 0}
         mock_load_config.return_value = {
             "llm": {"model": "qwen3.5-plus", "api_key": "", "base_url": ""},
             "embedding": {"model": "text-embedding-v4", "api_key": "", "base_url": ""},

@@ -82,29 +82,6 @@ class SessionManager:
             return []
         return data.get("messages", [])
 
-    def save_message(
-        self,
-        session_id: str,
-        role: str,
-        content: str,
-        tool_calls: list[dict[str, Any]] | None = None,
-    ) -> None:
-        """Append a message to the session history."""
-        data = self._read_file(session_id)
-        if not data:
-            now = time.time()
-            data = {
-                "title": "New Chat",
-                "created_at": now,
-                "updated_at": now,
-                "messages": [],
-            }
-        msg: dict[str, Any] = {"role": role, "content": content}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-        data["messages"].append(msg)
-        self._write_file(session_id, data)
-
     def rename_session(self, session_id: str, title: str) -> None:
         """Rename a session."""
         data = self._read_file(session_id)
@@ -198,42 +175,6 @@ class SessionManager:
         if not data:
             return None
         return data.get("compressed_context")
-
-    def load_session_for_agent(self, session_id: str) -> list[dict[str, Any]]:
-        """Load session history merged for LLM context.
-
-        Since we now save multiple consecutive assistant messages per turn,
-        this method combines them back into single assistant messages to
-        maintain proper user/assistant alternation for the LLM.
-
-        If compressed_context exists, inserts it at the head as an assistant
-        message so the LLM retains prior context.
-        """
-        data = self._read_file(session_id)
-        messages = data.get("messages", []) if data else []
-
-        merged: list[dict[str, Any]] = []
-
-        # Inject compressed context as the first message if available
-        compressed = data.get("compressed_context", "") if data else ""
-        if compressed:
-            merged.append({
-                "role": "assistant",
-                "content": f"{COMPRESSED_CONTEXT_PREFIX}\n{compressed}",
-            })
-
-        for msg in messages:
-            if (
-                merged
-                and merged[-1]["role"] == "assistant"
-                and msg["role"] == "assistant"
-            ):
-                # Combine consecutive assistant messages
-                merged[-1]["content"] += "\n" + msg["content"]
-            else:
-                # Strip tool_calls for agent context (not needed by LLM)
-                merged.append({"role": msg["role"], "content": msg["content"]})
-        return merged
 
     def get_message_count(self, session_id: str) -> int:
         """Return the number of messages in a session."""

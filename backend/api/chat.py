@@ -1,7 +1,6 @@
 """POST /api/chat — SSE streaming chat with Agent."""
 
 import json
-import os
 import traceback
 from typing import AsyncGenerator
 
@@ -10,7 +9,6 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from graph.agent import agent_manager
-from graph.session_manager import session_manager
 
 router = APIRouter()
 
@@ -24,7 +22,13 @@ class ChatRequest(BaseModel):
 async def _generate_title(session_id: str) -> str | None:
     """Generate a title for a session using DashScope Qwen. Returns title or None."""
     try:
-        messages = session_manager.load_session(session_id)
+        # 从 checkpoint 投影读取消息
+        from graph.checkpoint_history import CheckpointHistoryService
+
+        checkpointer = await agent_manager._ensure_checkpointer()
+        service = CheckpointHistoryService(checkpointer)
+        messages = await service.project(session_id)
+
         first_user = ""
         first_assistant = ""
         for msg in messages:
@@ -38,15 +42,13 @@ async def _generate_title(session_id: str) -> str | None:
         if not first_user:
             return None
 
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage as HM
 
-        llm = ChatOpenAI(
-            model=os.getenv("DASHSCOPE_MODEL", "qwen3.5-plus"),
-            api_key=os.getenv("DASHSCOPE_API_KEY"),
-            base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            temperature=0.3,
-        )
+        from config import create_auxiliary_llm
+
+        llm = create_auxiliary_llm()
+        if llm is None:
+            return None
 
         prompt = (
             f"根据以下对话内容，生成一个不超过10个字的中文标题，只输出标题文本，不要加引号或标点。\n\n"
@@ -56,7 +58,12 @@ async def _generate_title(session_id: str) -> str | None:
 
         result = await llm.ainvoke([HM(content=prompt)])
         title = result.content.strip().strip('"\'""''')[:20]
-        session_manager.update_title(session_id, title)
+        # 更新 SQLite 元数据
+        try:
+            repo = await agent_manager.get_session_repo()
+            await repo.rename(session_id, title)
+        except (FileNotFoundError, Exception):
+            pass
         return title
     except Exception:
         traceback.print_exc()
@@ -71,10 +78,9 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
     emitted and a new segment begins. Each segment is saved as a
     separate assistant message in the session history.
 
-    Conversation is saved in three scenarios:
-    1. Normal completion → saved in "done" event handler
-    2. Exception (API timeout, etc.) → saved in except block
-    3. Client disconnect (GeneratorExit) → saved in finally block
+    Conversation is persisted via checkpoint (AsyncSqliteSaver).
+    On stream interruption, checkpoint already has the last completed
+    node's snapshot, sufficient for context recovery.
     """
     segments: list[dict] = []
     current_segment: dict = {"content": "", "tool_calls": []}
@@ -82,11 +88,23 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
     stream_error: Exception | None = None
 
     try:
-        # Use merged history for agent context (combines consecutive assistant msgs)
-        history = session_manager.load_session_for_agent(session_id)
-        is_first_message = len(history) == 0
+        # touch 会话元数据（bootstrap_if_missing + 更新 updated_at）
+        try:
+            repo = await agent_manager.get_session_repo()
+            await repo.bootstrap_if_missing(session_id)
+            await repo.touch(session_id)
+        except Exception:
+            pass  # 元数据操作失败不应阻塞对话
 
-        async for event in agent_manager.astream(message, history, session_id=session_id):
+        # 判断是否首条消息：通过 checkpoint 检查是否已有消息
+        from graph.checkpoint_history import CheckpointHistoryService
+
+        checkpointer = await agent_manager._ensure_checkpointer()
+        history_service = CheckpointHistoryService(checkpointer)
+        existing_messages = await history_service.project(session_id)
+        is_first_message = len(existing_messages) == 0
+
+        async for event in agent_manager.astream(message, [], session_id=session_id):
             event_type = event.get("type", "unknown")
 
             if event_type == "retrieval":
@@ -141,18 +159,6 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
 
             elif event_type == "done":
                 segments.append(current_segment)
-
-                session_manager.save_message(session_id, "user", message)
-                for seg in segments:
-                    # 跳过无内容且无工具调用的空 segment
-                    if not seg["content"] and not seg["tool_calls"]:
-                        continue
-                    # 如果 segment 仅有工具调用但无文本内容，
-                    # 检查后续 segment 是否有内容，避免保存孤立的空工具调用
-                    tc = seg["tool_calls"] if seg["tool_calls"] else None
-                    session_manager.save_message(
-                        session_id, "assistant", seg["content"], tool_calls=tc
-                    )
                 conversation_saved = True
 
                 yield {
@@ -179,27 +185,8 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
         stream_error = e
 
     finally:
-        # Save partial conversation on ANY interruption:
-        # - Exception (API timeout, token limit, network error)
-        # - GeneratorExit (client disconnect, browser closed)
-        # - CancelledError (anyio cancel scope from sse-starlette)
-        if not conversation_saved:
-            try:
-                segments.append(current_segment)
-                has_content = any(
-                    seg["content"] or seg["tool_calls"] for seg in segments
-                )
-                if has_content:
-                    session_manager.save_message(session_id, "user", message)
-                    for seg in segments:
-                        if seg["content"] or seg["tool_calls"]:
-                            tc = seg["tool_calls"] if seg["tool_calls"] else None
-                            session_manager.save_message(
-                                session_id, "assistant", seg["content"], tool_calls=tc
-                            )
-                    print(f"[WARN] Stream interrupted, partial conversation saved for session {session_id}")
-            except Exception as save_err:
-                print(f"[ERROR] Failed to save partial conversation: {save_err}")
+        # 流式中断时不再保存 JSON——checkpoint 已有最后完成 node 的快照
+        pass
 
     # Yield error event outside finally (cannot yield inside finally)
     if stream_error is not None:

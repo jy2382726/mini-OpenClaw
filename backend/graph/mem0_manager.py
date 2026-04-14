@@ -17,7 +17,7 @@ except ImportError:
     pass
 from typing import Any
 
-from config import get_mem0_config, load_config
+from config import get_mem0_config, load_config, get_auxiliary_model_config
 
 
 class Mem0Manager:
@@ -45,29 +45,26 @@ class Mem0Manager:
         llm_config = config.get("llm", {})
         emb_config = config.get("embedding", {})
 
-        # 优先使用 mem0 独立抽取模型，未配置则复用主对话模型
+        # 使用统一的辅助模型配置
+        aux_cfg = get_auxiliary_model_config()
+        llm_model = aux_cfg["model"]
+
+        # API 配置复用主模型
+        llm_api_key = llm_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
+        llm_base_url = llm_config.get("base_url") or os.getenv(
+            "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+
+        # max_tokens 优先从 mem0 extraction_model 读取，否则使用默认值
         extraction_cfg = mem0_cfg.get("extraction_model") or {}
-        if extraction_cfg.get("model"):
-            llm_model = extraction_cfg.get("model")
-            llm_api_key = extraction_cfg.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
-            llm_base_url = extraction_cfg.get("base_url") or os.getenv(
-                "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            )
-            max_tokens = extraction_cfg.get("max_tokens", 512)
-        else:
-            llm_model = llm_config.get("model") or os.getenv("DASHSCOPE_MODEL", "qwen3.5-plus")
-            llm_api_key = llm_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
-            llm_base_url = llm_config.get("base_url") or os.getenv(
-                "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            )
-            max_tokens = llm_config.get("max_tokens", 1500)
+        max_tokens = extraction_cfg.get("max_tokens", 512)
 
         emb_model = emb_config.get("model") or "text-embedding-v4"
         emb_api_key = emb_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
         emb_base_url = emb_config.get("base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-        # mem0 数据存储目录
-        mem0_data_dir = base_dir / "storage" / "mem0_data"
+        # mem0 数据存储目录（支持 _test_data_dir 注入以隔离测试）
+        mem0_data_dir = getattr(self, "_test_data_dir", None) or (base_dir / "storage" / "mem0_data")
         mem0_data_dir.mkdir(parents=True, exist_ok=True)
 
         mem0_config = {

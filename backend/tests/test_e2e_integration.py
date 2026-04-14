@@ -44,37 +44,6 @@ class TestEndToEndIntegration:
             agent = mgr._build_agent()
             assert agent is not None
 
-    def test_build_messages_normal_history(self):
-        """正常历史消息转换。"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mgr = self._setup_agent(Path(tmpdir))
-            history = [
-                {"role": "user", "content": "你好"},
-                {"role": "assistant", "content": "你好！"},
-            ]
-            messages = mgr._build_messages("今天怎么样？", history)
-            assert len(messages) == 3
-            assert all(isinstance(m, (HumanMessage, AIMessage)) for m in messages)
-
-    def test_build_messages_with_compressed_context(self):
-        """压缩上下文首条消息被保留。"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            from graph.session_manager import COMPRESSED_CONTEXT_PREFIX
-
-            mgr = self._setup_agent(Path(tmpdir))
-            history = [
-                {"role": "assistant", "content": COMPRESSED_CONTEXT_PREFIX + "之前的摘要..."},
-                {"role": "user", "content": "继续"},
-            ]
-            # 制造超长历史
-            for i in range(60):
-                history.append({"role": "assistant", "content": f"回复{i}"})
-                history.append({"role": "user", "content": f"问题{i}"})
-
-            messages = mgr._build_messages("新的请求", history)
-            # 压缩上下文首条应被保留
-            assert COMPRESSED_CONTEXT_PREFIX in messages[0].content
-
     def test_middleware_chain_with_config_toggles(self):
         """中间件链正确响应配置开关。"""
         from config import get_middleware_config
@@ -102,22 +71,19 @@ class TestEndToEndIntegration:
 
     def test_dynamic_prefix_injection_position(self):
         """Zone 3 SystemMessage 注入在当前 HumanMessage 之前。"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mgr = self._setup_agent(Path(tmpdir))
-            history = [{"role": "user", "content": "你好"}]
+        from langchain_core.messages import SystemMessage
 
-            # 手动模拟 astream 中的 Zone 3 注入
-            messages = mgr._build_messages("帮我创建项目", history)
-            from langchain_core.messages import SystemMessage
-            dynamic = "<!-- Zone 3: Dynamic -->\n测试内容"
-            if dynamic:
-                messages.insert(len(messages) - 1, SystemMessage(content=dynamic))
+        # 模拟当前 astream/ainvoke 中的 Zone 3 注入逻辑
+        messages = [HumanMessage(content="帮我创建项目")]
+        dynamic = "<!-- Zone 3: Dynamic -->\n测试内容"
+        if dynamic:
+            messages.insert(len(messages) - 1, SystemMessage(content=dynamic))
 
-            # 最后一条是用户消息
-            assert isinstance(messages[-1], HumanMessage)
-            # 倒数第二条是 SystemMessage（Zone 3）
-            assert isinstance(messages[-2], SystemMessage)
-            assert "Zone 3" in messages[-2].content
+        # 最后一条是用户消息
+        assert isinstance(messages[-1], HumanMessage)
+        # 倒数第二条是 SystemMessage（Zone 3）
+        assert isinstance(messages[-2], SystemMessage)
+        assert "Zone 3" in messages[-2].content
 
 
 class TestSSEEventStream:

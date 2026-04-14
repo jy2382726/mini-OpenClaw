@@ -1,13 +1,16 @@
-"""Session CRUD API — list / create / rename / delete / raw messages / generate title."""
+"""Session CRUD API — list / create / rename / delete / raw messages / generate title.
 
-import os
+数据源：SessionRepository（SQLite 元数据）+ CheckpointHistoryService（消息投影）。
+"""
+
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from graph.session_manager import session_manager
+from graph.agent import agent_manager
+from graph.checkpoint_history import CheckpointDebugViewService, CheckpointHistoryService
 from graph.prompt_builder import build_system_prompt
 
 router = APIRouter()
@@ -26,7 +29,8 @@ class RenameRequest(BaseModel):
 @router.get("/sessions")
 async def list_sessions():
     """List all sessions with title and metadata."""
-    sessions = session_manager.list_sessions()
+    repo = await agent_manager.get_session_repo()
+    sessions = await repo.list()
     return {"sessions": sessions}
 
 
@@ -34,15 +38,17 @@ async def list_sessions():
 async def create_session():
     """Create a new empty session."""
     session_id = f"session-{uuid.uuid4().hex[:12]}"
-    meta = session_manager.create_session(session_id)
+    repo = await agent_manager.get_session_repo()
+    meta = await repo.create(session_id)
     return meta
 
 
 @router.put("/sessions/{session_id}")
 async def rename_session(session_id: str, req: RenameRequest):
     """Rename an existing session."""
+    repo = await agent_manager.get_session_repo()
     try:
-        session_manager.rename_session(session_id, req.title)
+        await repo.rename(session_id, req.title)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"id": session_id, "title": req.title}
@@ -50,36 +56,57 @@ async def rename_session(session_id: str, req: RenameRequest):
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """Delete a session."""
-    session_manager.delete_session(session_id)
+    """Delete a session.
+
+    软删除元数据 + 物理删除 checkpoint 线程。
+    """
+    repo = await agent_manager.get_session_repo()
+    await repo.soft_delete(session_id)
+
+    # 物理删除 checkpoint 线程
+    checkpointer = await agent_manager._ensure_checkpointer()
+    if hasattr(checkpointer, "adelete_thread"):
+        await checkpointer.adelete_thread(session_id)
+
     return {"status": "deleted", "id": session_id}
 
 
 @router.get("/sessions/{session_id}/messages")
 async def get_raw_messages(session_id: str):
-    """Get complete raw messages including system prompt."""
-    data = session_manager.get_raw_messages(session_id)
-    system_prompt = build_system_prompt(BASE_DIR)
-    # Prepend system prompt as the first message
-    all_messages = [{"role": "system", "content": system_prompt}] + data.get("messages", [])
-    return {"session_id": session_id, "title": data.get("title", ""), "messages": all_messages}
+    """Get complete raw messages including system prompt (debug view)."""
+    checkpointer = await agent_manager._ensure_checkpointer()
+    service = CheckpointDebugViewService(checkpointer)
+    result = await service.project(session_id, BASE_DIR)
+    # 补充 title
+    try:
+        repo = await agent_manager.get_session_repo()
+        meta = await repo.get(session_id)
+        result["title"] = meta["title"] if meta else ""
+    except Exception:
+        pass
+    result["session_id"] = session_id
+    return result
 
 
 @router.get("/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
     """Get conversation history for display (no system prompt, includes tool_calls)."""
-    messages = session_manager.load_session(session_id)
+    checkpointer = await agent_manager._ensure_checkpointer()
+    service = CheckpointHistoryService(checkpointer)
+    messages = await service.project(session_id)
     return {"session_id": session_id, "messages": messages}
 
 
 @router.post("/sessions/{session_id}/generate-title")
 async def generate_title(session_id: str):
-    """Use DashScope Qwen to generate a short title from the first conversation turn."""
-    messages = session_manager.load_session(session_id)
+    """Use auxiliary model to generate a short title from the first conversation turn."""
+    checkpointer = await agent_manager._ensure_checkpointer()
+    service = CheckpointHistoryService(checkpointer)
+    messages = await service.project(session_id)
+
     if not messages:
         raise HTTPException(status_code=400, detail="No messages to generate title from")
 
-    # Get the first user message and first assistant reply
     first_user = ""
     first_assistant = ""
     for msg in messages:
@@ -94,15 +121,13 @@ async def generate_title(session_id: str):
         raise HTTPException(status_code=400, detail="No user message found")
 
     try:
-        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage as HM
 
-        llm = ChatOpenAI(
-            model=os.getenv("DASHSCOPE_MODEL", "qwen3.5-plus"),
-            api_key=os.getenv("DASHSCOPE_API_KEY"),
-            base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            temperature=0.3,
-        )
+        from config import create_auxiliary_llm
+
+        llm = create_auxiliary_llm()
+        if llm is None:
+            raise HTTPException(status_code=500, detail="辅助模型未配置，无法生成标题")
 
         prompt = (
             f"根据以下对话内容，生成一个不超过10个字的中文标题，只输出标题文本，不要加引号或标点。\n\n"
@@ -113,18 +138,32 @@ async def generate_title(session_id: str):
         result = await llm.ainvoke([HM(content=prompt)])
         title = result.content.strip().strip('"\'""''')[:20]
 
-        session_manager.update_title(session_id, title)
+        repo = await agent_manager.get_session_repo()
+        try:
+            await repo.rename(session_id, title)
+        except FileNotFoundError:
+            pass
         return {"session_id": session_id, "title": title}
 
     except Exception as e:
         # Fallback: use first few chars of user message
         fallback_title = first_user[:10].strip()
-        session_manager.update_title(session_id, fallback_title)
+        repo = await agent_manager.get_session_repo()
+        try:
+            await repo.rename(session_id, fallback_title)
+        except FileNotFoundError:
+            pass
         return {"session_id": session_id, "title": fallback_title}
 
 
 @router.post("/sessions/{session_id}/clear")
 async def clear_session_messages(session_id: str):
-    """Clear all messages in a session (like Claude Code /clear)."""
-    session_manager.clear_messages(session_id)
+    """Clear all messages in a session (like Claude Code /clear).
+
+    删除 checkpoint 线程，下次对话从空状态开始。
+    """
+    checkpointer = await agent_manager._ensure_checkpointer()
+    if hasattr(checkpointer, "adelete_thread"):
+        await checkpointer.adelete_thread(session_id)
+
     return {"status": "cleared", "session_id": session_id}

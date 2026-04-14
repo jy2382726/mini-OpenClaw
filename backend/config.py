@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "api_key": "",
         "temperature": 0.7,
         "max_tokens": 4096,
+        "context_window": 131072,
     },
     "embedding": {
         "provider": "dashscope",
@@ -42,6 +44,8 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "middleware": {
         "tool_output_budget": {
             "enabled": True,
+            "safe_ratio": 0.25,
+            "pressure_ratio": 0.45,
             "budgets": {
                 "terminal": 2000,
                 "python_repl": 1500,
@@ -135,6 +139,12 @@ def save_config(config: dict[str, Any]) -> None:
     _cache_ts = 0.0
 
 
+def get_context_window() -> int:
+    """获取模型上下文窗口大小（token 数），默认 131072（128K）。"""
+    config = load_config()
+    return int(config.get("llm", {}).get("context_window", 131072))
+
+
 def get_rag_mode() -> bool:
     """Get current RAG mode setting."""
     return bool(load_config().get("rag_mode", False))
@@ -145,6 +155,75 @@ def set_rag_mode(enabled: bool) -> None:
     config = load_config()
     config["rag_mode"] = enabled
     save_config(config)
+
+
+def get_auxiliary_model_config() -> dict[str, Any]:
+    """获取辅助模型配置，含向后兼容优先级链。
+
+    优先级：auxiliary_model > summary_model > mem0.extraction_model > 默认值。
+    """
+    config = load_config()
+
+    # 最高优先级：新的 auxiliary_model 配置
+    aux_cfg = config.get("auxiliary_model")
+    if aux_cfg and aux_cfg.get("model"):
+        return {
+            "model": aux_cfg["model"],
+            "temperature": aux_cfg.get("temperature", 0),
+        }
+
+    # 次优先级：旧的 summary_model 配置
+    summary_cfg = config.get("summary_model")
+    if summary_cfg and summary_cfg.get("model"):
+        return {
+            "model": summary_cfg["model"],
+            "temperature": summary_cfg.get("temperature", 0),
+        }
+
+    # 第三优先级：mem0.extraction_model 的 model 字段
+    mem0_extraction = config.get("mem0", {}).get("extraction_model") or {}
+    if mem0_extraction.get("model"):
+        return {
+            "model": mem0_extraction["model"],
+            "temperature": 0,
+        }
+
+    # 默认值
+    return {"model": "qwen3.5-flash", "temperature": 0}
+
+
+def create_auxiliary_llm():
+    """创建辅助模型 LLM 实例，所有辅助任务统一调用。
+
+    复用主模型的 api_key 和 base_url。无 API key 时返回 None。
+    构造失败时也返回 None，确保调用方安全降级。
+    """
+    from langchain_openai import ChatOpenAI
+
+    aux_cfg = get_auxiliary_model_config()
+    config = load_config()
+
+    # 复用主模型的 API 配置
+    llm_config = config.get("llm", {})
+    api_key = llm_config.get("api_key") or os.getenv("DASHSCOPE_API_KEY", "")
+    api_base = llm_config.get("base_url") or os.getenv(
+        "DASHSCOPE_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    if not api_key:
+        return None
+
+    try:
+        return ChatOpenAI(
+            model=aux_cfg["model"],
+            api_key=api_key,
+            base_url=api_base,
+            temperature=aux_cfg["temperature"],
+        )
+    except Exception as e:
+        print(f"⚠️ 辅助模型创建失败: {e}")
+        return None
 
 
 def get_mem0_config() -> dict[str, Any]:
@@ -204,6 +283,7 @@ def get_settings_for_display() -> dict[str, Any]:
             **config.get("rag", {}),
         },
         "compression": config.get("compression", {}),
+        "auxiliary_model": config.get("auxiliary_model", {"model": "qwen3.5-flash", "temperature": 0}),
         "summary_model": config.get("summary_model", _DEFAULT_CONFIG["summary_model"]),
         "middleware": get_middleware_config(),
         "features": get_features_config(),
@@ -223,7 +303,7 @@ def update_settings(updates: dict[str, Any]) -> None:
         llm_update = updates["llm"]
         if "llm" not in config:
             config["llm"] = {}
-        for key in ("provider", "model", "base_url", "temperature", "max_tokens"):
+        for key in ("provider", "model", "base_url", "temperature", "max_tokens", "context_window"):
             if key in llm_update:
                 config["llm"][key] = llm_update[key]
         # Only update API key if a non-empty value is provided
@@ -256,6 +336,14 @@ def update_settings(updates: dict[str, Any]) -> None:
             config["compression"] = {}
         if "ratio" in comp_update:
             config["compression"]["ratio"] = comp_update["ratio"]
+
+    if "auxiliary_model" in updates:
+        aux_update = updates["auxiliary_model"]
+        if "auxiliary_model" not in config:
+            config["auxiliary_model"] = {}
+        for key in ("model", "temperature"):
+            if key in aux_update:
+                config["auxiliary_model"][key] = aux_update[key]
 
     if "mem0" in updates:
         mem0_update = updates["mem0"]

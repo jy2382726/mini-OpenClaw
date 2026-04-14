@@ -24,14 +24,22 @@ import {
   type SystemSettings,
 } from "@/lib/settingsApi";
 
-type SettingsCategory = "model" | "embedding" | "rag" | "data" | "advanced";
+type SettingsCategory = "model" | "auxiliary" | "embedding" | "rag" | "data" | "advanced";
 
 const CATEGORIES: { key: SettingsCategory; label: string; icon: React.ElementType; color: string }[] = [
   { key: "model", label: "LLM 模型", icon: Bot, color: "#002fa7" },
+  { key: "auxiliary", label: "辅助模型", icon: Zap, color: "#06b6d4" },
   { key: "embedding", label: "Embedding", icon: Sparkles, color: "#f59e0b" },
   { key: "rag", label: "RAG 设置", icon: Database, color: "#7c3aed" },
   { key: "data", label: "数据管理", icon: HardDrive, color: "#10b981" },
   { key: "advanced", label: "高级设置", icon: Sliders, color: "#6b7280" },
+];
+
+const AUX_MODEL_PRESETS = [
+  { value: "qwen3.5-flash", label: "qwen3.5-flash（推荐，快速轻量）" },
+  { value: "qwen-turbo", label: "qwen-turbo（经典摘要模型）" },
+  { value: "qwen-plus", label: "qwen-plus（高质量，较慢）" },
+  { value: "custom", label: "自定义模型" },
 ];
 
 const LLM_PROVIDERS = [
@@ -46,6 +54,19 @@ const EMB_PROVIDERS = [
   { value: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", defaultModel: "text-embedding-3-small" },
   { value: "custom", label: "自定义", baseUrl: "", defaultModel: "" },
 ];
+
+/** 已知模型的上下文窗口大小（token 数） */
+const CONTEXT_WINDOWS: Record<string, number> = {
+  "qwen3.5-plus": 131072,
+  "qwen3.5-flash": 131072,
+  "qwen-turbo": 1000000,
+  "qwen-plus": 131072,
+  "qwen-max": 32768,
+  "deepseek-chat": 65536,
+  "deepseek-reasoner": 65536,
+  "gpt-4o": 128000,
+  "gpt-4o-mini": 128000,
+};
 
 export default function SettingsPage() {
   const [category, setCategory] = useState<SettingsCategory>("model");
@@ -65,6 +86,7 @@ export default function SettingsPage() {
   const [maxTokens, setMaxTokens] = useState(4096);
   const [llmTesting, setLlmTesting] = useState(false);
   const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [contextWindow, setContextWindow] = useState(131072);
 
   // Embedding form state
   const [embProvider, setEmbProvider] = useState("");
@@ -84,6 +106,11 @@ export default function SettingsPage() {
   // Compression
   const [compRatio, setCompRatio] = useState(0.5);
 
+  // Auxiliary model form state
+  const [auxModel, setAuxModel] = useState("qwen3.5-flash");
+  const [auxModelCustom, setAuxModelCustom] = useState("");
+  const [auxTemperature, setAuxTemperature] = useState(0);
+
   // Load settings on mount
   useEffect(() => {
     getSettings()
@@ -96,6 +123,7 @@ export default function SettingsPage() {
         setLlmApiKeyMasked(s.llm.api_key_masked || "");
         setTemperature(s.llm.temperature ?? 0.7);
         setMaxTokens(s.llm.max_tokens ?? 4096);
+        setContextWindow(s.llm.context_window ?? 131072);
         // Populate Embedding fields
         setEmbProvider(s.embedding.provider || "");
         setEmbModel(s.embedding.model || "");
@@ -107,6 +135,17 @@ export default function SettingsPage() {
         setRagThreshold(s.rag.similarity_threshold);
         // Compression
         setCompRatio(s.compression.ratio);
+        // Auxiliary model
+        if (s.auxiliary_model) {
+          const preset = AUX_MODEL_PRESETS.find((p) => p.value === s.auxiliary_model.model);
+          if (preset) {
+            setAuxModel(s.auxiliary_model.model);
+          } else {
+            setAuxModel("custom");
+            setAuxModelCustom(s.auxiliary_model.model);
+          }
+          setAuxTemperature(s.auxiliary_model.temperature ?? 0);
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -128,6 +167,11 @@ export default function SettingsPage() {
           ...(llmApiKey ? { api_key: llmApiKey } : {}),
           temperature,
           max_tokens: maxTokens,
+          context_window: contextWindow,
+        },
+        auxiliary_model: {
+          model: auxModel === "custom" ? auxModelCustom : auxModel,
+          temperature: auxTemperature,
         },
         embedding: {
           provider: embProvider,
@@ -157,7 +201,7 @@ export default function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [llmProvider, llmModel, llmBaseUrl, llmApiKey, temperature, maxTokens, embProvider, embModel, embBaseUrl, embApiKey, ragEnabled, ragTopK, ragThreshold, compRatio, showToast]);
+  }, [llmProvider, llmModel, llmBaseUrl, llmApiKey, temperature, maxTokens, contextWindow, auxModel, auxModelCustom, auxTemperature, embProvider, embModel, embBaseUrl, embApiKey, ragEnabled, ragTopK, ragThreshold, compRatio, showToast]);
 
   const handleTestLlm = useCallback(async () => {
     setLlmTesting(true);
@@ -257,7 +301,12 @@ export default function SettingsPage() {
                       const p = LLM_PROVIDERS.find((p) => p.value === val);
                       if (p) {
                         if (p.baseUrl) setLlmBaseUrl(p.baseUrl);
-                        if (p.defaultModel) setLlmModel(p.defaultModel);
+                        if (p.defaultModel) {
+                          setLlmModel(p.defaultModel);
+                          // 联动上下文窗口：预设模型自动填入已知窗口大小
+                          const known = CONTEXT_WINDOWS[p.defaultModel];
+                          if (known) setContextWindow(known);
+                        }
                       }
                       // 切换供应商时清空 API Key，避免混淆
                       if (val !== prevProvider) {
@@ -276,7 +325,13 @@ export default function SettingsPage() {
                   <input
                     type="text"
                     value={llmModel}
-                    onChange={(e) => setLlmModel(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setLlmModel(val);
+                      // 手动输入模型名时联动上下文窗口
+                      const known = CONTEXT_WINDOWS[val];
+                      if (known) setContextWindow(known);
+                    }}
                     className="form-input"
                     placeholder="qwen3.5-plus"
                   />
@@ -347,6 +402,73 @@ export default function SettingsPage() {
                     onChange={(e) => setMaxTokens(parseInt(e.target.value) || 4096)}
                     className="form-input"
                   />
+                </FormField>
+                <FormField label="Context Window (tokens)">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min="4096"
+                      max={2000000}
+                      step={1024}
+                      value={contextWindow}
+                      onChange={(e) => setContextWindow(parseInt(e.target.value) || 131072)}
+                      className="form-input flex-1"
+                    />
+                    {CONTEXT_WINDOWS[llmModel] && (
+                      <span className="text-[10px] text-gray-400 whitespace-nowrap">
+                        已知模型默认值
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    模型的上下文窗口大小，影响工具输出压缩和摘要触发阈值。切换模型时自动填入。
+                  </p>
+                </FormField>
+              </SettingsCard>
+            )}
+
+            {/* Auxiliary Model Settings */}
+            {category === "auxiliary" && (
+              <SettingsCard title="辅助模型配置" icon={Zap} color="#06b6d4">
+                <p className="text-[11px] text-gray-400 mb-2">
+                  用于摘要、标题生成、mem0 提取等辅助任务，共享主模型 API 配置
+                </p>
+                <FormField label="模型">
+                  <select
+                    value={auxModel}
+                    onChange={(e) => setAuxModel(e.target.value)}
+                    className="form-select"
+                  >
+                    {AUX_MODEL_PRESETS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </FormField>
+                {auxModel === "custom" && (
+                  <FormField label="自定义模型名">
+                    <input
+                      type="text"
+                      value={auxModelCustom}
+                      onChange={(e) => setAuxModelCustom(e.target.value)}
+                      className="form-input"
+                      placeholder="输入模型名称，如 qwen3.5-plus"
+                    />
+                  </FormField>
+                )}
+                <FormField label={`Temperature: ${auxTemperature}`}>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={auxTemperature}
+                    onChange={(e) => setAuxTemperature(parseFloat(e.target.value))}
+                    className="w-full accent-cyan-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                    <span>精确 (0)</span>
+                    <span>灵活 (1)</span>
+                  </div>
                 </FormField>
               </SettingsCard>
             )}

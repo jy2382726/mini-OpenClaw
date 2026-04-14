@@ -6,12 +6,17 @@
 """
 
 import asyncio
+import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# 禁用 mem0 遥测，避免与运行中的后端服务产生 ~/.mem0/migrations_qdrant 锁冲突
+os.environ["MEM0_TELEMETRY"] = "False"
 
 try:
     from dotenv import load_dotenv
@@ -22,6 +27,8 @@ except ImportError:
 
 class TestMem0Integration(unittest.TestCase):
     """mem0 优化联调测试 — 所有测试在同一个类中顺序执行，共享 mem0 实例。
+
+    使用独立的临时目录，避免与运行中的后端服务产生 Qdrant 锁冲突。
 
     测试顺序：
     1. 初始化 + 配置验证
@@ -38,14 +45,33 @@ class TestMem0Integration(unittest.TestCase):
     mgr = None
     base_dir = Path(__file__).resolve().parent.parent
     test_user = "default"  # 与 mem0_manager._get_user_id() 保持一致
+    _tmpdir = None
 
     @classmethod
     def setUpClass(cls):
-        """初始化 mem0 管理器（只初始化一次，所有测试共享）。"""
+        """初始化 mem0 管理器（只初始化一次，所有测试共享）。
+        使用独立临时目录避免 Qdrant 本地模式的并发锁冲突。
+        """
         import graph.mem0_manager as mm
         mm._instance = None
         from graph.mem0_manager import get_mem0_manager
-        cls.mgr = get_mem0_manager(cls.base_dir)
+        cls._tmpdir = tempfile.TemporaryDirectory(prefix="mem0_test_")
+        tmp_path = Path(cls._tmpdir.name)
+        # 创建 workspace 文件让 prompt_builder 正常工作
+        (tmp_path / "workspace").mkdir(exist_ok=True)
+        (tmp_path / "workspace" / "SOUL.md").write_text("测试", encoding="utf-8")
+        (tmp_path / "workspace" / "IDENTITY.md").write_text("测试", encoding="utf-8")
+        (tmp_path / "workspace" / "USER.md").write_text("测试", encoding="utf-8")
+        (tmp_path / "workspace" / "AGENTS.md").write_text("测试", encoding="utf-8")
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir(exist_ok=True)
+        cls.mgr = get_mem0_manager(tmp_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        """清理临时目录。"""
+        if cls._tmpdir:
+            cls._tmpdir.cleanup()
 
     # ==================== 方案一：独立轻量模型 ====================
 

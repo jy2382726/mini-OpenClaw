@@ -5,7 +5,6 @@
 无需前端手动触发。此接口保留作为备用回退，后续版本将移除。
 """
 
-import os
 import traceback
 from typing import Any
 
@@ -18,15 +17,12 @@ router = APIRouter()
 
 
 async def _generate_summary(messages: list[dict[str, Any]]) -> str:
-    """Use DashScope Qwen to generate a compressed summary of messages."""
-    from langchain_openai import ChatOpenAI
+    """Use auxiliary model to generate a compressed summary of messages."""
+    from config import create_auxiliary_llm
 
-    llm = ChatOpenAI(
-        model=os.getenv("DASHSCOPE_MODEL", "qwen3.5-plus"),
-        api_key=os.getenv("DASHSCOPE_API_KEY"),
-        base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        temperature=0.3,
-    )
+    llm = create_auxiliary_llm()
+    if llm is None:
+        raise RuntimeError("辅助模型未配置，无法生成摘要")
 
     # Format messages for summary
     formatted = []

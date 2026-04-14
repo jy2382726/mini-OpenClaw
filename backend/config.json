@@ -6,7 +6,8 @@
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "api_key": "sk-4dfa4c7c18bd41fa994ad0fd2557deab",
     "temperature": 0.7,
-    "max_tokens": 8096
+    "max_tokens": 8096,
+    "context_window": 131072
   },
   "embedding": {
     "provider": "dashscope",
@@ -28,6 +29,8 @@
   "middleware": {
     "tool_output_budget": {
       "enabled": true,
+      "safe_ratio": 0.25,
+      "pressure_ratio": 0.45,
       "budgets": {
         "terminal": 2000,
         "python_repl": 1500,
@@ -75,5 +78,9 @@
       "max_tokens": 512,
       "enable_thinking": false
     }
+  },
+  "auxiliary_model": {
+    "model": "qwen3.5-flash",
+    "temperature": 0
   }
 }

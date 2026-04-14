@@ -7,7 +7,8 @@ import tiktoken
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from graph.session_manager import session_manager
+from graph.agent import agent_manager
+from graph.checkpoint_history import CheckpointHistoryService
 from graph.prompt_builder import build_system_prompt
 
 router = APIRouter()
@@ -29,7 +30,10 @@ async def get_session_token_count(session_id: str) -> dict[str, Any]:
     system_prompt = build_system_prompt(BASE_DIR)
     system_tokens = _count_tokens(system_prompt)
 
-    messages = session_manager.load_session(session_id)
+    checkpointer = await agent_manager._ensure_checkpointer()
+    service = CheckpointHistoryService(checkpointer)
+    messages = await service.project(session_id)
+
     message_tokens = 0
     for msg in messages:
         message_tokens += _count_tokens(msg.get("content", ""))
