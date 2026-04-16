@@ -218,3 +218,5 @@ next-env.d.ts
 # .serverless
 # terraform.tfstate
 # terraform.tfstate.*
+# Added by code-review-graph
+.code-review-graph/
