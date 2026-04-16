@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+定义辅助模型的配置和使用规范，统一系统中所有辅助任务（标题生成、摘要、mem0 提取等）的 LLM 实例创建，支持向后兼容旧配置。
+
+## Requirements
 
 ### Requirement: 统一辅助模型配置结构
 

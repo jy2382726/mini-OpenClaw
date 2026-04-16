@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+定义技能注册表（SkillRegistry）的元数据解析、启发式属性推断、多维度索引构建和四级技能上下文注入机制，实现 Agent Skills 标准兼容的技能管理系统。
+
+## Requirements
 
 ### Requirement: Agent Skills 标准兼容的元数据解析
 

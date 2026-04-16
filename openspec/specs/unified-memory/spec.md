@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+定义统一记忆检索接口（UnifiedMemoryRetriever），整合 MEMORY.md 文件注入、mem0 结构化记忆和 RAG 向量检索，实现记忆按相关性过滤和优化注入位置。
+
+## Requirements
 
 ### Requirement: 统一记忆检索接口
 

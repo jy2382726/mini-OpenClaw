@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+定义将 LangGraph checkpoint 转换为前端所需格式的投影服务，包括 UI 气泡投影、调试视图投影、feature flag 控制、clear/delete 语义修正等，实现从 JSON 文件存储向 checkpoint 存储的平滑迁移。
+
+## Requirements
 
 ### Requirement: CheckpointHistoryService UI 气泡投影
 
@@ -56,6 +60,8 @@
 - 当 `checkpoint_history_read` 为 `false`（默认）时，继续从 `session_manager` 的 JSON 文件读取
 - 当 `checkpoint_history_read` 为 `true` 时，从 checkpoint projection 读取
 
+手动摘要完成后，前端 MUST 自动刷新 `/history` 和 `/api/tokens/session/{id}` 以反映摘要后的消息状态。
+
 #### Scenario: Flag 关闭时使用 JSON 数据源
 
 - **WHEN** `checkpoint_history_read` 为 false，前端请求 `/api/sessions/{id}/history`
@@ -65,6 +71,49 @@
 
 - **WHEN** `checkpoint_history_read` 为 true，前端请求 `/api/sessions/{id}/history`
 - **THEN** 系统 MUST 调用 `CheckpointHistoryService.project(thread_id)` 返回投影结果
+
+#### Scenario: 手动摘要后 history 自动刷新
+
+- **WHEN** 前端手动摘要成功完成后
+- **THEN** 前端 MUST 自动调用 `/api/sessions/{id}/history` 和 `/api/tokens/session/{id}` 刷新聊天记录和 token 统计，显示摘要后的消息
+
+### Requirement: TaskState 恢复端点
+
+系统 MUST 提供 `GET /api/sessions/{session_id}/task-state` 端点，用于前端恢复 TaskState。
+
+端点 MUST 通过 `agent.aget_state(config)` 从 checkpoint 读取 Agent 状态，提取 `task_state` 字段返回。
+
+返回格式：
+
+```json
+{
+  "task_state": {
+    "session_id": "...",
+    "goal": "...",
+    "steps": [...],
+    "artifacts": [...],
+    "decisions": [...],
+    "blockers": [...]
+  }
+}
+```
+
+当 checkpoint 不存在或 task_state 字段为空时，MUST 返回 `{"task_state": null}`。
+
+#### Scenario: 有活跃 TaskState 时返回完整数据
+
+- **WHEN** 前端请求 `GET /api/sessions/{id}/task-state`，且该会话有活跃 TaskState
+- **THEN** 系统 MUST 返回完整的 TaskState 对象
+
+#### Scenario: 无 TaskState 时返回 null
+
+- **WHEN** 前端请求 `GET /api/sessions/{id}/task-state`，且该会话无活跃 TaskState
+- **THEN** 系统 MUST 返回 `{"task_state": null}`，HTTP 状态码 200
+
+#### Scenario: checkpoint 不存在时返回 null
+
+- **WHEN** 前端请求 `GET /api/sessions/{id}/task-state`，但该会话无 checkpoint 数据
+- **THEN** 系统 MUST 返回 `{"task_state": null}`，HTTP 状态码 200
 
 ### Requirement: Feature Flag 控制 Agent 输入来源
 

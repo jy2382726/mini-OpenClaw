@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+定义会话元数据的数据库表结构和 SessionRepository 管理类，将元数据与会话消息存储解耦，提供 CRUD 操作和 bootstrap_if_missing 等会话管理功能。
+
+## Requirements
 
 ### Requirement: 会话元数据数据库表
 
