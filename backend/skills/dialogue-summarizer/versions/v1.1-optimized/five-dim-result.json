@@ -1,0 +1,169 @@
+{
+  "skill_name": "dialogue-summarizer",
+  "timestamp": 1776323266.188,
+  "total_score": 24,
+  "grade": "生产级",
+  "verdict_note": "已达到生产级标准，建议补充自动化测试执行脚本和通过率监控",
+  "dimensions": [
+    {
+      "name": "触发质量",
+      "score": 5,
+      "reason": "边界精确，触发语句列举详尽，覆盖多种表达方式",
+      "checks": [
+        {
+          "item": "触发关键词覆盖全面",
+          "passed": true
+        },
+        {
+          "item": "边界条件定义清晰",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "路由清晰度",
+      "score": 5,
+      "reason": "流程分步清晰，模式选择条件明确，回退机制完善",
+      "checks": [
+        {
+          "item": "执行步骤有序编号",
+          "passed": true
+        },
+        {
+          "item": "条件分支逻辑明确",
+          "passed": true
+        },
+        {
+          "item": "异常情况有回退方案",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "上下文效率",
+      "score": 4,
+      "reason": "203 行适中，引用分层清晰，但部分信息可进一步精简",
+      "checks": [
+        {
+          "item": "SKILL.md 行数在合理范围 (203 行)",
+          "passed": true
+        },
+        {
+          "item": "引用文件分层明确 (scripts/references/assets)",
+          "passed": true
+        },
+        {
+          "item": "模板与逻辑分离",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "复用与确定性",
+      "score": 5,
+      "reason": "核心逻辑脚本化，三种模板文件化，测试用例覆盖完整",
+      "checks": [
+        {
+          "item": "核心逻辑已脚本化 (summarizer.py)",
+          "passed": true
+        },
+        {
+          "item": "三种模板独立文件化",
+          "passed": true
+        },
+        {
+          "item": "测试用例覆盖多场景",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "name": "验证强度",
+      "score": 5,
+      "reason": "测试覆盖 7 个场景，断言类型丰富，有明确字数和格式标准",
+      "checks": [
+        {
+          "item": "有独立 evals.json 测试文件",
+          "passed": true
+        },
+        {
+          "item": "测试用例覆盖多模式 (快速/标准/详细)",
+          "passed": true
+        },
+        {
+          "item": "有边界情况测试 (上下文不完整)",
+          "passed": true
+        },
+        {
+          "item": "断言类型多样化 (contains/table/length/count)",
+          "passed": true
+        },
+        {
+          "item": "有独立测试脚本 (test_skill.py)",
+          "passed": true
+        },
+        {
+          "item": "成功标准量化 (字数范围、列表数量)",
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "strengths": [
+    {
+      "dimension": "触发质量",
+      "text": "触发语句列举了 7+ 种用户表达方式，包括长短对话场景"
+    },
+    {
+      "dimension": "路由清晰度",
+      "text": "三步模式选择（快速/标准/详细）基于对话轮数，决策逻辑清晰"
+    },
+    {
+      "dimension": "复用与确定性",
+      "text": "完整的脚本体系 (summarizer.py + context_handler.py)，模板完全文件化"
+    },
+    {
+      "dimension": "上下文效率",
+      "text": "引用分层清晰，核心脚本、参考文档、资源文件三级分离"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "7 个测试用例覆盖完整场景，包含边界情况和回退机制"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "断言类型丰富 (contains/contains_table/contains_any/length/count_list_items)"
+    },
+    {
+      "dimension": "整体",
+      "text": "完整的技能生态系统，从触发到验证形成闭环"
+    },
+    {
+      "dimension": "整体",
+      "text": "脚本化程度高，可维护性强"
+    }
+  ],
+  "weaknesses": [
+    {
+      "dimension": "触发质量",
+      "text": "未明确定义\"对话很长\"的具体阈值（虽有 16 轮+ 但可更精确）"
+    },
+    {
+      "dimension": "上下文效率",
+      "text": "部分说明文字可精简，如\"注意事项\"和\"优化建议\"可移至 references"
+    },
+    {
+      "dimension": "验证强度",
+      "text": "未定义自动化执行流程和通过率标准"
+    },
+    {
+      "dimension": "整体",
+      "text": "\"注意事项\"和\"优化建议\"章节可移至 references 以精简主文件"
+    },
+    {
+      "dimension": "整体",
+      "text": "未定义自动化测试执行流程和通过率阈值"
+    }
+  ],
+  "session_id": "eval-dialogue-summarizer-1776323213125"
+}

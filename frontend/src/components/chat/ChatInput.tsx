@@ -5,10 +5,11 @@ import { ArrowUp, Square, Eraser, Archive } from "lucide-react";
 import { useApp } from "@/lib/store";
 import { listSkills } from "@/lib/api";
 import SlashCommandMenu from "./SlashCommandMenu";
+import TaskProgressPanel from "./TaskProgressPanel";
 
 export default function ChatInput() {
   const [text, setText] = useState("");
-  const { sendMessage, stopStreaming, isStreaming, isCompressing, compressCurrentSession, clearCurrentSession, messages } = useApp();
+  const { sendMessage, stopStreaming, isStreaming, isCompressing, compressCurrentSession, clearCurrentSession, messages, currentTaskState } = useApp();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const disabled = isStreaming || isCompressing;
 
@@ -135,12 +136,12 @@ export default function ChatInput() {
 
   const handleCompress = useCallback(async () => {
     if (disabled || messages.length < 4) return;
-    if (!confirm(`确定要压缩当前会话吗？\n\n将压缩前 ${Math.max(4, Math.floor(messages.length / 2))} 条消息为摘要，保留后续消息。`)) return;
+    if (!confirm("确定要摘要早期消息吗？\n\n将保留最近 10 条消息，早期消息会被结构化摘要替代。")) return;
     try {
       await compressCurrentSession();
-      alert("压缩完成！旧消息已归档为摘要。");
+      alert("摘要完成！早期消息已压缩为摘要。");
     } catch {
-      alert("压缩失败，请检查后端服务是否正常。");
+      alert("摘要失败，请检查后端服务是否正常。");
     }
   }, [disabled, messages.length, compressCurrentSession]);
 
@@ -153,7 +154,7 @@ export default function ChatInput() {
             onClick={handleCompress}
             disabled={disabled || messages.length < 4}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-gray-600 bg-white/60 border border-black/[0.06] hover:bg-white hover:shadow-sm hover:text-[#002fa7] transition-all disabled:opacity-25 disabled:cursor-not-allowed"
-            title={messages.length < 4 ? "至少需要 4 条消息才能压缩" : "压缩上下文（前50%消息归档为摘要）"}
+            title={messages.length < 4 ? "至少需要 4 条消息才能摘要" : "摘要早期消息，保留最近 10 条"}
           >
             <Archive className="w-3.5 h-3.5" />
             压缩
@@ -169,6 +170,8 @@ export default function ChatInput() {
           </button>
         </div>
       )}
+
+      <TaskProgressPanel taskState={currentTaskState} />
 
       <div className="glass-input rounded-2xl flex items-end gap-2 px-4 py-2.5 max-w-2xl mx-auto hover:shadow-md transition-shadow relative">
         <SlashCommandMenu

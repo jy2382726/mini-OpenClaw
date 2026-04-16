@@ -4,15 +4,16 @@ import { useEffect, useRef } from "react";
 import { useApp } from "@/lib/store";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
+import TaskCard from "./TaskCard";
 import { Sparkles } from "lucide-react";
 
 export default function ChatPanel() {
-  const { messages } = useApp();
+  const { messages, currentTaskState, taskTriggerMsgId } = useApp();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, currentTaskState]);
 
   return (
     <div className="flex flex-col h-full">
@@ -38,7 +39,15 @@ export default function ChatPanel() {
         ) : (
           <div className="py-4">
             {messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
+              <div key={msg.id}>
+                <ChatMessage message={msg} />
+                {/* TaskCard 在触发任务的用户消息之后渲染 */}
+                {msg.id === taskTriggerMsgId && currentTaskState && (
+                  <div className="px-4 py-1.5 max-w-2xl mx-auto">
+                    <TaskCard taskState={currentTaskState} />
+                  </div>
+                )}
+              </div>
             ))}
             <div ref={bottomRef} />
           </div>

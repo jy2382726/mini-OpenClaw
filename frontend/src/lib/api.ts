@@ -261,6 +261,7 @@ export async function getFileTokenCounts(
 
 /**
  * Compress a session's conversation history.
+ * @deprecated 使用 summarizeSession 替代（基于 checkpoint 摘要）
  */
 export async function compressSession(
   sessionId: string
@@ -270,6 +271,20 @@ export async function compressSession(
     { method: "POST" }
   );
   if (!resp.ok) throw new Error(`Failed to compress session: ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * Summarize early messages in a session via checkpoint (keeps latest 10).
+ */
+export async function summarizeSession(
+  sessionId: string
+): Promise<{ summarized: boolean; summarized_count: number; preserved_count: number }> {
+  const resp = await fetch(
+    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/summarize`,
+    { method: "POST" }
+  );
+  if (!resp.ok) throw new Error(`Failed to summarize session: ${resp.status}`);
   return resp.json();
 }
 
@@ -308,5 +323,34 @@ export async function setRagMode(
     body: JSON.stringify({ enabled }),
   });
   if (!resp.ok) throw new Error(`Failed to set RAG mode: ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * 从 checkpoint 恢复 TaskState（用于页面刷新/会话切换时恢复）。
+ */
+
+export interface TaskStateResponse {
+  task_state: {
+    session_id: string;
+    goal: string;
+    steps: Array<{
+      description: string;
+      status: string;
+      result_summary?: string;
+    }>;
+    artifacts: string[];
+    decisions: string[];
+    blockers: string[];
+  } | null;
+}
+
+export async function fetchTaskState(
+  sessionId: string
+): Promise<TaskStateResponse> {
+  const resp = await fetch(
+    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/task-state`
+  );
+  if (!resp.ok) throw new Error(`Failed to fetch task state: ${resp.status}`);
   return resp.json();
 }

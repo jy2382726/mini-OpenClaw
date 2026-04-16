@@ -1,11 +1,12 @@
 """AgentManager — Core Agent using LangChain create_agent API with DashScope Qwen."""
 
+import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from config import load_config, get_mem0_config, get_features_config, create_auxiliary_llm
 from graph.prompt_builder import build_stable_prefix, build_dynamic_prefix
@@ -25,6 +26,7 @@ class AgentManager:
         self._checkpointer = None  # 跨请求共享的 checkpointer
         self._session_repo = None  # SessionRepository（与 checkpointer 共享连接）
         self._db_path: str | None = None  # SQLite 数据库路径（懒加载）
+        self._summarize_locks: dict[str, asyncio.Lock] = {}  # 按 session_id 粒度的摘要并发锁
 
     def initialize(self, base_dir: Path) -> None:
         """Initialize LLM (DashScope Qwen) and tools. Called once at startup."""
@@ -198,6 +200,124 @@ class AgentManager:
         """
         return create_auxiliary_llm()
 
+    def _get_summarize_lock(self, session_id: str) -> asyncio.Lock:
+        """获取指定会话的摘要并发锁（按 session_id 粒度）。"""
+        if session_id not in self._summarize_locks:
+            self._summarize_locks[session_id] = asyncio.Lock()
+        return self._summarize_locks[session_id]
+
+    async def summarize_checkpoint(
+        self, session_id: str, keep_count: int = 10
+    ) -> dict[str, Any]:
+        """从 checkpoint 读取消息，对早期消息生成结构化摘要并写回。
+
+        Args:
+            session_id: 会话 ID
+            keep_count: 保留最近 N 条消息不被摘要（默认 10）
+
+        Returns:
+            {"summarized": bool, "summarized_count": int, "preserved_count": int}
+
+        Raises:
+            ValueError: checkpoint 不存在或消息数不足
+            RuntimeError: 辅助 LLM 不可用
+            asyncio.TimeoutError: 并发冲突（已在摘要中）
+        """
+        # Task 1.4: 并发安全锁
+        lock = self._get_summarize_lock(session_id)
+        if lock.locked():
+            raise asyncio.TimeoutError("该会话正在摘要中，请稍后再试")
+
+        async with lock:
+            await self._ensure_checkpointer()
+            agent = self._build_agent()
+            config = {"configurable": {"thread_id": session_id}}
+
+            # 1. 从 checkpoint 读取消息
+            snapshot = await agent.aget_state(config)
+            if not snapshot or not snapshot.values:
+                raise ValueError("该会话无可用消息（checkpoint 不存在）")
+
+            messages = snapshot.values.get("messages", [])
+            if not messages:
+                raise ValueError("该会话无可用消息")
+
+            # 2. 判断是否需要摘要
+            if len(messages) <= keep_count:
+                return {
+                    "summarized": False,
+                    "reason": "消息数不足，无需摘要",
+                    "summarized_count": 0,
+                    "preserved_count": len(messages),
+                }
+
+            # 3. 切分消息，AI/Tool 配对保护
+            split_idx = len(messages) - keep_count
+            split_idx = self._protect_ai_tool_pairs(messages, split_idx)
+
+            to_summarize = messages[:split_idx]
+            preserved = messages[split_idx:]
+
+            # 4. 调用辅助 LLM 生成摘要
+            summary_llm = self._create_summary_llm()
+            if summary_llm is None:
+                raise RuntimeError("辅助模型未配置，无法生成摘要")
+
+            summary_text = await self._generate_checkpoint_summary(summary_llm, to_summarize)
+
+            # 5. 构造新消息列表
+            summary_message = HumanMessage(
+                content=f"Here is a summary of the conversation to date:\n\n{summary_text}",
+                additional_kwargs={"lc_source": "summarization"},
+            )
+            new_messages = [summary_message] + list(preserved)
+
+            # 6. 写回 checkpoint
+            await agent.aupdate_state(config, {"messages": new_messages}, as_node="model")
+
+            return {
+                "summarized": True,
+                "summarized_count": len(to_summarize),
+                "preserved_count": len(preserved),
+            }
+
+    def _protect_ai_tool_pairs(self, messages: list, split_idx: int) -> int:
+        """AI/Tool 消息配对保护：确保切割点不切断 AIMessage-ToolMessage 配对。
+
+        如果 split_idx 落在 ToolMessage 上，向前查找到包含对应 tool_calls
+        的 AIMessage，将整个配对纳入摘要范围。
+        """
+        if split_idx <= 0 or split_idx >= len(messages):
+            return split_idx
+
+        msg_at_split = messages[split_idx]
+
+        # 如果切割点落在 ToolMessage 上，向前查找对应 AIMessage
+        if isinstance(msg_at_split, ToolMessage):
+            tool_id = getattr(msg_at_split, "tool_call_id", None)
+            if tool_id:
+                for i in range(split_idx - 1, -1, -1):
+                    candidate = messages[i]
+                    if isinstance(candidate, AIMessage):
+                        tool_calls = getattr(candidate, "tool_calls", [])
+                        if any(tc.get("id") == tool_id for tc in tool_calls):
+                            # 将 AIMessage 及其所有 ToolMessage 纳入摘要
+                            split_idx = i
+                            break
+
+        return split_idx
+
+    async def _generate_checkpoint_summary(self, llm, messages: list) -> str:
+        """使用辅助 LLM 和 DEFAULT_SUMMARY_PROMPT 生成结构化摘要。"""
+        from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
+        from langchain_core.messages import get_buffer_string
+
+        formatted = get_buffer_string(messages)
+        prompt = DEFAULT_SUMMARY_PROMPT.format(messages=formatted).rstrip()
+
+        result = await llm.ainvoke([HumanMessage(content=prompt)])
+        return result.content.strip() if hasattr(result, "content") else str(result).strip()
+
     async def _summarize_goal(self, message: str) -> str:
         """使用轻量 LLM 将用户消息总结为简洁的任务目标。
 
@@ -279,6 +399,7 @@ class AgentManager:
         # 任务状态管理：恢复已有 TaskState 或创建新的
         task_state_dict: dict | None = None
         task_state_md = ""
+        should_push_task_update = False  # 是否需要在 SSE 流中推送初始 task_update
         if self._base_dir and features.get("task_state", True):
             from graph.task_state import is_task_message, create_task_state, format_task_state
 
@@ -290,7 +411,17 @@ class AgentManager:
             # 从 checkpoint 恢复已有 TaskState
             existing_task = await self._read_task_state(agent, thread_config)
 
+            # 判断已有任务是否有活跃步骤（in_progress/pending/blocked）
+            # 无步骤或全部 completed → 视为"无活跃任务"，可创建新任务
+            existing_has_active = False
             if existing_task:
+                steps = existing_task.get("steps", [])
+                existing_has_active = any(
+                    s.get("status") in ("in_progress", "pending", "blocked")
+                    for s in steps
+                )
+
+            if existing_task and existing_has_active:
                 # 已有活跃 TaskState
                 if is_task_message(message):
                     # 新任务性消息 → 追加步骤（Task 2.3）
@@ -299,6 +430,7 @@ class AgentManager:
                         "description": goal,
                         "status": "in_progress",
                     })
+                    should_push_task_update = True  # 步骤追加时推送
                 task_state_dict = existing_task
                 task_state_md = format_task_state(existing_task)
             elif is_task_message(message):
@@ -308,11 +440,21 @@ class AgentManager:
                     session_id=session_id,
                     goal=goal,
                 )
+                # 自动添加初始步骤（与已有任务追加步骤逻辑一致）
+                task_state_dict["steps"].append({
+                    "description": goal,
+                    "status": "in_progress",
+                })
                 task_state_md = format_task_state(task_state_dict)
+                should_push_task_update = True  # 首次创建时推送
 
             # 将 TaskState 写入 AgentCustomState（Task 2.1）
             if task_state_dict is not None:
                 await self._write_task_state(agent, thread_config, task_state_dict)
+
+            # 推送初始 task_update 事件（任务创建或步骤追加）
+            if should_push_task_update and task_state_dict is not None:
+                yield {"type": "task_update", "task_state": task_state_dict}
         else:
             agent = self._build_agent()
             thread_config = {"configurable": {"thread_id": session_id}}
@@ -361,6 +503,13 @@ class AgentManager:
             elif mode == "updates":
                 if isinstance(data, dict):
                     for node_name, node_data in data.items():
+                        # TaskState 变更检测：推送 task_update SSE 事件
+                        if isinstance(node_data, dict) and node_data.get("task_state") is not None:
+                            yield {
+                                "type": "task_update",
+                                "task_state": node_data["task_state"],
+                            }
+
                         if node_name == "tools" and "messages" in node_data:
                             for tool_msg in node_data["messages"]:
                                 if hasattr(tool_msg, "name"):
@@ -382,6 +531,20 @@ class AgentManager:
                                         }
 
         yield {"type": "done", "content": full_response}
+
+        # 流结束时自动完成活跃任务步骤
+        if task_state_dict is not None:
+            has_active = any(
+                s.get("status") == "in_progress"
+                for s in task_state_dict.get("steps", [])
+            )
+            if has_active:
+                for step in task_state_dict.get("steps", []):
+                    if step.get("status") == "in_progress":
+                        step["status"] = "completed"
+                # 写回 checkpoint 并推送最终状态
+                await self._write_task_state(agent, thread_config, task_state_dict)
+                yield {"type": "task_update", "task_state": task_state_dict}
 
         # 智能截流：将对话追加到缓冲区，由缓冲区判断是否触发 mem0 写入
         # 关键优化：mem0 的 add() 会调用 LLM 做事实提取（约 20-90 秒），
@@ -451,7 +614,16 @@ class AgentManager:
 
             existing_task = await self._read_task_state(agent, thread_config)
 
+            # 判断已有任务是否有活跃步骤
+            existing_has_active = False
             if existing_task:
+                steps = existing_task.get("steps", [])
+                existing_has_active = any(
+                    s.get("status") in ("in_progress", "pending", "blocked")
+                    for s in steps
+                )
+
+            if existing_task and existing_has_active:
                 if is_task_message(message):
                     goal = await self._summarize_goal(message)
                     existing_task["steps"].append({
@@ -463,6 +635,10 @@ class AgentManager:
             elif is_task_message(message):
                 goal = await self._summarize_goal(message)
                 task_state_dict = create_task_state(session_id=session_id, goal=goal)
+                task_state_dict["steps"].append({
+                    "description": goal,
+                    "status": "in_progress",
+                })
                 task_state_md = format_task_state(task_state_dict)
 
             if task_state_dict is not None:

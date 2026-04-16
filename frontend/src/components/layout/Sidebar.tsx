@@ -130,7 +130,7 @@ export default function Sidebar() {
                 onClick={() => setShowCompressModal(true)}
                 disabled={isCompressing}
                 className="p-1 rounded-md text-gray-400 hover:text-gray-600 hover:bg-black/[0.04] transition-colors disabled:opacity-40"
-                title="Compress history"
+                title="Summarize history"
               >
                 {isCompressing ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -205,9 +205,9 @@ export default function Sidebar() {
       {showCompressModal && (
         <div className="fixed inset-0 z-[110] bg-black/50 flex items-center justify-center p-6 animate-fade-in">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5 space-y-4">
-            <h3 className="text-[14px] font-semibold text-gray-800">Compress History</h3>
+            <h3 className="text-[14px] font-semibold text-gray-800">Summarize History</h3>
             <p className="text-[13px] text-gray-600 leading-relaxed">
-              Are you sure you want to compress 50% of conversation history? The compressed messages will be archived and replaced with a summary.
+              Summarize early messages and keep the latest 10? The summarized messages will be replaced with a structured summary.
             </p>
             <div className="flex items-center justify-end gap-2">
               <button

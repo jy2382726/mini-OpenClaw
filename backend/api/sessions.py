@@ -167,3 +167,18 @@ async def clear_session_messages(session_id: str):
         await checkpointer.adelete_thread(session_id)
 
     return {"status": "cleared", "session_id": session_id}
+
+
+@router.get("/sessions/{session_id}/task-state")
+async def get_task_state(session_id: str):
+    """从 checkpoint 读取 TaskState，用于前端恢复展示。
+
+    返回格式: {"task_state": <TaskState 或 null>}
+    """
+    try:
+        agent = agent_manager._build_agent()
+        config = {"configurable": {"thread_id": session_id}}
+        task_state = await agent_manager._read_task_state(agent, config)
+        return {"task_state": task_state}
+    except Exception:
+        return {"task_state": None}

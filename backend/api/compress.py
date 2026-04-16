@@ -1,20 +1,46 @@
-"""POST /api/sessions/{session_id}/compress — Compress conversation history.
+"""会话消息压缩与摘要端点。
 
-⚠️ DEPRECATED: 此模块已被 LangChain SummarizationMiddleware 自动摘要替代。
-中间件在每次模型调用前自动检查 token 数并触发结构化摘要，
-无需前端手动触发。此接口保留作为备用回退，后续版本将移除。
+POST /api/sessions/{session_id}/summarize — 基于 checkpoint 的手动摘要（推荐）
+POST /api/sessions/{session_id}/compress  — 旧 JSON 文件压缩（DEPRECATED）
 """
 
+import asyncio
 import traceback
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from langchain_core.messages import HumanMessage
 
+from graph.agent import agent_manager
 from graph.session_manager import session_manager
 
 router = APIRouter()
 
+
+@router.post("/sessions/{session_id}/summarize")
+async def summarize_session(session_id: str) -> dict[str, Any]:
+    """基于 checkpoint 的手动摘要：保留最近 10 条消息，早期消息替换为结构化摘要。"""
+    try:
+        result = await agent_manager.summarize_checkpoint(session_id)
+        return result
+    except ValueError as e:
+        # checkpoint 不存在或消息为空
+        raise HTTPException(status_code=400, detail=str(e))
+    except asyncio.TimeoutError:
+        # 并发冲突：该会话正在摘要中
+        raise HTTPException(status_code=409, detail="该会话正在摘要中，请稍后再试")
+    except RuntimeError as e:
+        # 辅助 LLM 不可用
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"摘要失败: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# DEPRECATED: 以下端点操作 JSON 文件数据源，不操作 checkpoint。
+# 请使用 POST /sessions/{session_id}/summarize 替代。
+# ---------------------------------------------------------------------------
 
 async def _generate_summary(messages: list[dict[str, Any]]) -> str:
     """Use auxiliary model to generate a compressed summary of messages."""
@@ -44,9 +70,12 @@ async def _generate_summary(messages: list[dict[str, Any]]) -> str:
     return result.content.strip()
 
 
-@router.post("/sessions/{session_id}/compress")
+@router.post("/sessions/{session_id}/compress", deprecated=True)
 async def compress_session(session_id: str) -> dict[str, Any]:
-    """Compress the first 50% of conversation history into a summary."""
+    """[DEPRECATED] 使用 POST /sessions/{session_id}/summarize 替代。
+
+    压缩前 50% 的对话历史为摘要（基于 JSON 文件，不影响 checkpoint）。
+    """
     messages = session_manager.load_session(session_id)
     if len(messages) < 4:
         raise HTTPException(

@@ -157,6 +157,15 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
                     ),
                 }
 
+            elif event_type == "task_update":
+                yield {
+                    "event": "task_update",
+                    "data": json.dumps(
+                        {"task_state": event["task_state"]},
+                        ensure_ascii=False,
+                    ),
+                }
+
             elif event_type == "done":
                 segments.append(current_segment)
                 conversation_saved = True
