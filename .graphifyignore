@@ -1,0 +1,97 @@
+# ============================================
+# 依赖与构建产物
+# ============================================
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+out/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# ============================================
+# 运行时数据（非源码）
+# ============================================
+backend/sessions/
+backend/storage/
+backend/knowledge/
+backend/memory/
+backend/graph/*.db
+backend/graph/*.sqlite
+backend/graph/*.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# ============================================
+# 配置与环境文件
+# ============================================
+.env
+.env.*
+*.pem
+*.key
+# config.json
+
+# ============================================
+# IDE / 工具缓存
+# ============================================
+.claude/
+.superpowers/
+.playwright-mcp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+
+# ============================================
+# 日志与临时文件
+# ============================================
+*.log
+*.tmp
+*.bak
+*.pid
+*.lock
+logs/
+tmp/
+temp/
+
+# ============================================
+# 文档与规范（非代码）
+# ============================================
+# docs/
+# openspec/
+# *.md
+# !backend/workspace/*.md
+
+# ============================================
+# 脚本与辅助文件
+# ============================================
+scripts/
+backend/tests/
+backend/workspace/*.py
+backend/skills/*/versions/
+
+# ============================================
+# OS 生成文件
+# ============================================
+.DS_Store
+Thumbs.db
+
+# ============================================
+# 其他
+# ============================================
+package-lock.json
+*.tsbuildinfo
+*.css
+*.png
+*.html
