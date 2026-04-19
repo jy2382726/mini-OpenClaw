@@ -57,7 +57,7 @@ export default function ChatMessage({ message }: Props) {
             <div className="flex-1 min-w-0">
               {/* Tool calls */}
               {message.toolCalls && message.toolCalls.length > 0 && (
-                <ThoughtChain toolCalls={message.toolCalls} />
+                <ThoughtChain toolCalls={message.toolCalls} messageId={message.id} />
               )}
 
               {/* Auth error alert */}

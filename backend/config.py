@@ -78,6 +78,12 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "model": "qwen3.5-flash",
         "temperature": 0,
     },
+    "hitl": {
+        "enabled": False,
+        "approval_required": ["terminal", "write_file", "python_repl"],
+        "timeout_seconds": 30,
+        "timeout_action": "reject",
+    },
     "mem0": {
         "enabled": False,
         "mode": "legacy",  # "legacy" | "mem0" | "hybrid"
@@ -216,6 +222,14 @@ def get_mem0_config() -> dict[str, Any]:
     return _deep_merge(defaults, mem0_cfg)
 
 
+def get_hitl_config() -> dict[str, Any]:
+    """获取 HITL（Human-in-the-Loop）审批配置。"""
+    config = load_config()
+    defaults = _DEFAULT_CONFIG["hitl"]
+    hitl_cfg = config.get("hitl", {})
+    return _deep_merge(defaults, hitl_cfg)
+
+
 def get_middleware_config() -> dict[str, Any]:
     """获取中间件配置，始终返回完整默认值。"""
     config = load_config()
@@ -269,6 +283,7 @@ def get_settings_for_display() -> dict[str, Any]:
         "summary_model": config.get("summary_model", _DEFAULT_CONFIG["summary_model"]),
         "middleware": get_middleware_config(),
         "features": get_features_config(),
+        "hitl": get_hitl_config(),
         "mem0": config.get("mem0", _DEFAULT_CONFIG["mem0"]),
     }
     # Remove raw API keys from response
@@ -355,5 +370,13 @@ def update_settings(updates: dict[str, Any]) -> None:
         if "features" not in config:
             config["features"] = {}
         config["features"].update(feat_update)
+
+    if "hitl" in updates:
+        hitl_update = updates["hitl"]
+        if "hitl" not in config:
+            config["hitl"] = {}
+        for key in ("enabled", "approval_required", "timeout_seconds", "timeout_action"):
+            if key in hitl_update:
+                config["hitl"][key] = hitl_update[key]
 
     save_config(config)

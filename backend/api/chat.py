@@ -21,6 +21,11 @@ class ChatRequest(BaseModel):
     stream: bool = True
 
 
+class ApprovalRequest(BaseModel):
+    session_id: str
+    tool_call_id: str
+
+
 async def _generate_title(session_id: str) -> str | None:
     """Generate a title for a session using DashScope Qwen. Returns title or None."""
     try:
@@ -168,6 +173,20 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
                     ),
                 }
 
+            elif event_type == "tool_approval_needed":
+                yield {
+                    "event": "tool_approval",
+                    "data": json.dumps(
+                        {
+                            "pending_tools": event["pending_tools"],
+                            "session_id": event["session_id"],
+                            "timeout_seconds": event.get("timeout_seconds", 30),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+                return  # 不发 done，SSE 流暂停等待审批
+
             elif event_type == "done":
                 segments.append(current_segment)
                 conversation_saved = True
@@ -221,3 +240,131 @@ async def chat(request: ChatRequest):
     # Non-streaming fallback
     result = await agent_manager.ainvoke(request.message, request.session_id)
     return {"reply": result}
+
+
+async def _resume_event_generator(
+    session_id: str, rejected_tool_id: str | None = None
+) -> AsyncGenerator[dict, None]:
+    """从 checkpoint 恢复 Agent 执行，产出与 event_generator 相同格式的 SSE 事件。"""
+    try:
+        async for event in agent_manager.resume_stream(session_id, rejected_tool_id):
+            event_type = event.get("type", "unknown")
+
+            if event_type == "token":
+                yield {
+                    "event": "token",
+                    "data": json.dumps({"content": event["content"]}, ensure_ascii=False),
+                }
+
+            elif event_type == "tool_start":
+                yield {
+                    "event": "tool_start",
+                    "data": json.dumps(
+                        {"tool": event["tool"], "input": event["input"]},
+                        ensure_ascii=False,
+                    ),
+                }
+
+            elif event_type == "tool_end":
+                yield {
+                    "event": "tool_end",
+                    "data": json.dumps(
+                        {"tool": event["tool"], "output": event["output"]},
+                        ensure_ascii=False,
+                    ),
+                }
+
+            elif event_type == "task_update":
+                yield {
+                    "event": "task_update",
+                    "data": json.dumps(
+                        {"task_state": event["task_state"]},
+                        ensure_ascii=False,
+                    ),
+                }
+
+            elif event_type == "new_response":
+                yield {
+                    "event": "new_response",
+                    "data": json.dumps({}, ensure_ascii=False),
+                }
+
+            elif event_type == "tool_approval_needed":
+                yield {
+                    "event": "tool_approval",
+                    "data": json.dumps(
+                        {
+                            "pending_tools": event["pending_tools"],
+                            "session_id": event["session_id"],
+                            "timeout_seconds": event.get("timeout_seconds", 30),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+                return
+
+            elif event_type == "done":
+                yield {
+                    "event": "done",
+                    "data": json.dumps(
+                        {"content": event["content"], "session_id": session_id},
+                        ensure_ascii=False,
+                    ),
+                }
+
+    except Exception as e:
+        traceback.print_exc()
+        yield {
+            "event": "error",
+            "data": json.dumps(
+                {"error": f"恢复执行失败: {e}"},
+                ensure_ascii=False,
+            ),
+        }
+
+
+async def _validate_hitl_state(session_id: str, tool_call_id: str):
+    """验证 HITL 审批请求的合法性，返回 (agent, thread_config) 或抛出异常。"""
+    from langchain_core.messages import AIMessage
+
+    await agent_manager._ensure_checkpointer()
+    agent = agent_manager._build_agent()
+    thread_config = {"configurable": {"thread_id": session_id}}
+
+    snapshot = await agent.aget_state(thread_config)
+    if not snapshot.next:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="当前会话无待审批的工具调用")
+
+    # 验证 tool_call_id 存在
+    found = False
+    for msg in reversed(snapshot.values.get("messages", [])):
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc["id"] == tool_call_id:
+                    found = True
+                    break
+            break
+    if not found:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"tool_call_id '{tool_call_id}' 不存在")
+
+    return agent, thread_config
+
+
+@router.post("/chat/approve")
+async def approve_tool(request: ApprovalRequest):
+    """批准工具调用 → 从 checkpoint 恢复执行。"""
+    await _validate_hitl_state(request.session_id, request.tool_call_id)
+    return EventSourceResponse(
+        _resume_event_generator(request.session_id)
+    )
+
+
+@router.post("/chat/reject")
+async def reject_tool(request: ApprovalRequest):
+    """拒绝工具调用 → 注入拒绝消息后恢复执行。"""
+    await _validate_hitl_state(request.session_id, request.tool_call_id)
+    return EventSourceResponse(
+        _resume_event_generator(request.session_id, rejected_tool_id=request.tool_call_id)
+    )

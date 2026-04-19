@@ -91,10 +91,11 @@ def create_search_memories_tool(base_dir: Path) -> BaseTool:
                 lines = []
                 for i, item in enumerate(results):
                     meta = item.get("metadata", {})
+                    created = item.get("created_at") or meta.get("created_at", "N/A")
                     lines.append(
                         f"{i+1}. [{meta.get('memory_type', '?')}] {item.get('memory', '')}"
                         f" (置信度: {meta.get('confidence', 'N/A')}, "
-                        f"记录于: {meta.get('created_at', 'N/A')[:10]})"
+                        f"记录于: {created[:10] if created != 'N/A' else 'N/A'})"
                     )
                 return "\n".join(lines)
             except Exception as e:

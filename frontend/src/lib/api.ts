@@ -36,6 +36,16 @@ export async function* streamChat(
     throw new Error(`Chat API error: ${response.status}`);
   }
 
+  yield* parseSSEStream(response);
+}
+
+/**
+ * Parse SSE events from a fetch Response.
+ * Shared by streamChat, approveTool, rejectTool.
+ */
+async function* parseSSEStream(
+  response: Response
+): AsyncGenerator<SSEEvent> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("No response body");
 
@@ -45,7 +55,6 @@ export async function* streamChat(
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
-      // 处理 buffer 中剩余的未解析数据（如 title 事件）
       if (buffer.trim()) {
         const remaining = buffer.split("\n");
         let currentEvent = "message";
@@ -91,12 +100,53 @@ export async function* streamChat(
           }
         }
       }
-      // Empty line resets event type
       if (line === "") {
         currentEvent = "message";
       }
     }
   }
+}
+
+/**
+ * Approve a tool call — resumes agent from checkpoint, returns SSE stream.
+ */
+export async function* approveTool(
+  sessionId: string,
+  toolCallId: string
+): AsyncGenerator<SSEEvent> {
+  const response = await fetch(`${API_BASE}/chat/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, tool_call_id: toolCallId }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Approve failed (${response.status}): ${body}`);
+  }
+
+  yield* parseSSEStream(response);
+}
+
+/**
+ * Reject a tool call — injects rejection message and resumes agent, returns SSE stream.
+ */
+export async function* rejectTool(
+  sessionId: string,
+  toolCallId: string
+): AsyncGenerator<SSEEvent> {
+  const response = await fetch(`${API_BASE}/chat/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, tool_call_id: toolCallId }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Reject failed (${response.status}): ${body}`);
+  }
+
+  yield* parseSSEStream(response);
 }
 
 /**

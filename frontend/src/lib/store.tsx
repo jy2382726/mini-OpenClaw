@@ -30,7 +30,9 @@ export interface ToolCall {
   tool: string;
   input?: string;
   output?: string;
-  status: "running" | "done";
+  status: "running" | "done" | "pending_approval";
+  toolCallId?: string;
+  timeoutSeconds?: number;
 }
 
 export interface RetrievalResult {
@@ -148,6 +150,10 @@ interface AppState {
   // TaskState
   currentTaskState: TaskState | null;
   taskTriggerMsgId: string | null;
+
+  // HITL
+  approveToolCall: (messageId: string, toolCallId: string) => Promise<void>;
+  rejectToolCall: (messageId: string, toolCallId: string) => Promise<void>;
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -529,6 +535,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             continue;
           }
 
+          // Handle tool_approval — mark tools as pending_approval
+          if (event.event === "tool_approval") {
+            const targetId = currentAssistantIdRef.current;
+            const approvalData = event.data as {
+              pending_tools: Array<{ tool_call_id: string; tool: string; input: unknown }>;
+              session_id: string;
+              timeout_seconds: number;
+            };
+            const timeout = approvalData.timeout_seconds || 30;
+            setMessages((prev) => {
+              const updated = [...prev];
+              const idx = updated.findIndex((m) => m.id === targetId);
+              if (idx === -1) return prev;
+              const msg = { ...updated[idx] };
+              const newCalls: ToolCall[] = approvalData.pending_tools.map((pt) => ({
+                tool: pt.tool,
+                input: typeof pt.input === "string" ? pt.input : JSON.stringify(pt.input),
+                status: "pending_approval" as const,
+                toolCallId: pt.tool_call_id,
+                timeoutSeconds: timeout,
+              }));
+              msg.toolCalls = [...(msg.toolCalls || []), ...newCalls];
+              updated[idx] = msg;
+              return updated;
+            });
+            continue;
+          }
+
           const targetId = currentAssistantIdRef.current;
 
           setMessages((prev) => {
@@ -637,6 +671,113 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [isStreaming, isCompressing, sessionId, loadSessions]
   );
 
+  // ── HITL approve/reject ───────────────────────────────
+
+  const approveToolCall = useCallback(
+    async (messageId: string, toolCallId: string) => {
+      // 视觉反馈：将同消息内所有 pending_approval 工具统一标记为 running
+      // （interrupt_before 暂停粒度为整个 tools 节点，审批是 all-or-nothing）
+      setMessages((prev) => {
+        const updated = [...prev];
+        const idx = updated.findIndex((m) => m.id === messageId);
+        if (idx === -1) return prev;
+        const msg = { ...updated[idx] };
+        msg.toolCalls = (msg.toolCalls || []).map((c) =>
+          c.status === "pending_approval" ? { ...c, status: "running" as const } : c
+        );
+        updated[idx] = msg;
+        return updated;
+      });
+
+      try {
+        for await (const event of (await import("./api")).approveTool(sessionId, toolCallId)) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === messageId);
+            if (idx === -1) return prev;
+            const msg = { ...updated[idx] };
+
+            if (event.event === "tool_end") {
+              const calls = [...(msg.toolCalls || [])];
+              const tc = calls.find((c) => c.toolCallId === toolCallId || c.tool === (event.data.tool as string));
+              if (tc) {
+                calls[calls.indexOf(tc)] = { ...tc, output: event.data.output as string, status: "done" as const };
+              }
+              msg.toolCalls = calls;
+            } else if (event.event === "token") {
+              msg.content += (event.data.content as string) || "";
+            } else if (event.event === "done") {
+              // 流结束
+            }
+
+            updated[idx] = msg;
+            return updated;
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "审批失败";
+        setMessages((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((m) => m.id === messageId);
+          if (idx !== -1) updated[idx] = { ...updated[idx], content: updated[idx].content + `\n\n**⚠️ ${errMsg}**` };
+          return updated;
+        });
+      }
+    },
+    [sessionId]
+  );
+
+  const rejectToolCall = useCallback(
+    async (messageId: string, toolCallId: string) => {
+      try {
+        // 视觉反馈：将同消息内所有 pending_approval 工具统一标记为 running
+        setMessages((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((m) => m.id === messageId);
+          if (idx === -1) return prev;
+          const msg = { ...updated[idx] };
+          msg.toolCalls = (msg.toolCalls || []).map((c) =>
+            c.status === "pending_approval" ? { ...c, status: "running" as const } : c
+          );
+          updated[idx] = msg;
+          return updated;
+        });
+
+        for await (const event of (await import("./api")).rejectTool(sessionId, toolCallId)) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === messageId);
+            if (idx === -1) return prev;
+            const msg = { ...updated[idx] };
+
+            if (event.event === "token") {
+              msg.content += (event.data.content as string) || "";
+            } else if (event.event === "done") {
+              const calls = [...(msg.toolCalls || [])];
+              const tc = calls.find((c) => c.toolCallId === toolCallId);
+              if (tc) {
+                calls[calls.indexOf(tc)] = { ...tc, output: "用户拒绝了此工具调用", status: "done" as const };
+              }
+              msg.toolCalls = calls;
+            }
+
+            updated[idx] = msg;
+            return updated;
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "拒绝操作失败";
+        setMessages((prev) => {
+          const updated = [...prev];
+          const idx = updated.findIndex((m) => m.id === messageId);
+          if (idx !== -1) updated[idx] = { ...updated[idx], content: updated[idx].content + `\n\n**⚠️ ${errMsg}**` };
+          return updated;
+        });
+      }
+    },
+    [sessionId]
+  );
+
   return (
     <AppContext.Provider
       value={{
@@ -676,6 +817,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         toggleRagMode,
         currentTaskState,
         taskTriggerMsgId,
+        approveToolCall,
+        rejectToolCall,
       }}
     >
       {children}

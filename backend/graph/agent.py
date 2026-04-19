@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from config import load_config, get_mem0_config, get_features_config, create_auxiliary_llm
+from config import load_config, get_mem0_config, get_features_config, get_hitl_config, create_auxiliary_llm
 from graph.prompt_builder import build_stable_prefix, build_dynamic_prefix
 from graph.session_manager import session_manager
 from tools import get_all_tools
@@ -122,6 +122,13 @@ class AgentManager:
         # TaskState 通过 state_schema 嵌入，与 middleware 同时使用
         from graph.task_state import AgentCustomState
 
+        # HITL: 启用时在工具节点前暂停，等待人工审批
+        from config import get_hitl_config
+        interrupt_before = None
+        hitl_cfg = get_hitl_config()
+        if hitl_cfg.get("enabled") and hitl_cfg.get("approval_required"):
+            interrupt_before = ["tools"]
+
         agent = create_agent(
             model=self._llm,
             tools=self._tools,
@@ -129,6 +136,7 @@ class AgentManager:
             middleware=middleware,
             state_schema=AgentCustomState,
             checkpointer=self._checkpointer,
+            interrupt_before=interrupt_before,
         )
         return agent
 
@@ -364,6 +372,102 @@ class AgentManager:
         except Exception as e:
             print(f"⚠️ TaskState 写入 checkpoint 失败: {e}")
 
+    async def _stream_events(
+        self,
+        agent,
+        thread_config: dict,
+        session_id: str,
+        stream_input: dict | None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """核心事件流处理 + HITL interrupt 检测。
+
+        被 astream() 和 resume_stream() 共用。
+        """
+        full_response = ""
+        tools_just_finished = False
+
+        while True:
+            async for event in agent.astream(
+                stream_input,
+                config=thread_config,
+                stream_mode=["messages", "updates"],
+            ):
+                if isinstance(event, tuple):
+                    mode, data = event
+                else:
+                    mode = "messages"
+                    data = event
+
+                if mode == "messages":
+                    msg, metadata = data
+                    if hasattr(msg, "content") and msg.content:
+                        if msg.type == "AIMessageChunk" or msg.type == "ai":
+                            if msg.content and not getattr(msg, "tool_calls", None):
+                                if tools_just_finished:
+                                    yield {"type": "new_response"}
+                                    tools_just_finished = False
+                                full_response += msg.content
+                                yield {"type": "token", "content": msg.content}
+
+                elif mode == "updates":
+                    if isinstance(data, dict):
+                        for node_name, node_data in data.items():
+                            if isinstance(node_data, dict) and node_data.get("task_state") is not None:
+                                yield {
+                                    "type": "task_update",
+                                    "task_state": node_data["task_state"],
+                                }
+
+                            if node_name == "tools" and "messages" in node_data:
+                                for tool_msg in node_data["messages"]:
+                                    if hasattr(tool_msg, "name"):
+                                        yield {
+                                            "type": "tool_end",
+                                            "tool": tool_msg.name,
+                                            "output": str(tool_msg.content)[:2000],
+                                        }
+                                tools_just_finished = True
+                            elif node_name == "model" and "messages" in node_data:
+                                for agent_msg in node_data["messages"]:
+                                    if hasattr(agent_msg, "tool_calls") and agent_msg.tool_calls:
+                                        for tc in agent_msg.tool_calls:
+                                            yield {
+                                                "type": "tool_start",
+                                                "tool": tc["name"],
+                                                "input": str(tc.get("args", ""))[:1000],
+                                            }
+
+            # HITL interrupt 检测
+            hitl_cfg = get_hitl_config()
+            if hitl_cfg.get("enabled") and hitl_cfg.get("approval_required"):
+                snapshot = await agent.aget_state(thread_config)
+                if snapshot.next:
+                    approval_required = hitl_cfg["approval_required"]
+                    pending_tools = []
+                    for msg in reversed(snapshot.values.get("messages", [])):
+                        if isinstance(msg, AIMessage) and msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                if tc["name"] in approval_required:
+                                    pending_tools.append({
+                                        "tool_call_id": tc["id"],
+                                        "tool": tc["name"],
+                                        "input": tc.get("args", {}),
+                                    })
+                            break
+                    if pending_tools:
+                        yield {
+                            "type": "tool_approval_needed",
+                            "pending_tools": pending_tools,
+                            "session_id": session_id,
+                            "timeout_seconds": hitl_cfg.get("timeout_seconds", 30),
+                        }
+                        return
+                    stream_input = None
+                    continue
+            break
+
+        yield {"type": "done", "content": full_response}
+
     async def astream(
         self, message: str, history: list[dict[str, Any]] | None = None, session_id: str = "default"
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -473,64 +577,12 @@ class AgentManager:
             messages.insert(len(messages) - 1, SystemMessage(content=dynamic_prefix))
 
         full_response = ""
-        tools_just_finished = False
+        stream_input: dict | None = {"messages": messages}
 
-        async for event in agent.astream(
-            {"messages": messages},
-            config=thread_config,
-            stream_mode=["messages", "updates"],
-        ):
-            # event is a tuple of (stream_mode, data) when using multiple modes
-            if isinstance(event, tuple):
-                mode, data = event
-            else:
-                mode = "messages"
-                data = event
-
-            if mode == "messages":
-                # Token-level streaming from LLM
-                msg, metadata = data
-                if hasattr(msg, "content") and msg.content:
-                    if msg.type == "AIMessageChunk" or msg.type == "ai":
-                        if msg.content and not getattr(msg, "tool_calls", None):
-                            # If tools just finished, signal a new response segment
-                            if tools_just_finished:
-                                yield {"type": "new_response"}
-                                tools_just_finished = False
-                            full_response += msg.content
-                            yield {"type": "token", "content": msg.content}
-
-            elif mode == "updates":
-                if isinstance(data, dict):
-                    for node_name, node_data in data.items():
-                        # TaskState 变更检测：推送 task_update SSE 事件
-                        if isinstance(node_data, dict) and node_data.get("task_state") is not None:
-                            yield {
-                                "type": "task_update",
-                                "task_state": node_data["task_state"],
-                            }
-
-                        if node_name == "tools" and "messages" in node_data:
-                            for tool_msg in node_data["messages"]:
-                                if hasattr(tool_msg, "name"):
-                                    yield {
-                                        "type": "tool_end",
-                                        "tool": tool_msg.name,
-                                        "output": str(tool_msg.content)[:2000],
-                                    }
-                            # After all tool results, mark that tools finished
-                            tools_just_finished = True
-                        elif node_name == "model" and "messages" in node_data:
-                            for agent_msg in node_data["messages"]:
-                                if hasattr(agent_msg, "tool_calls") and agent_msg.tool_calls:
-                                    for tc in agent_msg.tool_calls:
-                                        yield {
-                                            "type": "tool_start",
-                                            "tool": tc["name"],
-                                            "input": str(tc.get("args", ""))[:1000],
-                                        }
-
-        yield {"type": "done", "content": full_response}
+        async for event in self._stream_events(agent, thread_config, session_id, stream_input):
+            yield event
+            if event.get("type") == "done":
+                full_response = event["content"]
 
         # 流结束时自动完成活跃任务步骤
         if task_state_dict is not None:
@@ -553,6 +605,51 @@ class AgentManager:
             mem0_cfg = get_mem0_config()
             if mem0_cfg.get("enabled") and mem0_cfg.get("auto_extract"):
                 self._schedule_mem0_write(message, full_response, mem0_cfg)
+
+    async def resume_stream(
+        self,
+        session_id: str,
+        rejected_tool_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """从 checkpoint 恢复 Agent 执行（HITL 审批后调用）。
+
+        approve: rejected_tool_id=None → 直接恢复执行，所有待执行工具正常调用
+        reject:  rejected_tool_id=xxx → 为所有待执行 tool_calls 注入 ToolMessage
+                 （被拒绝的给拒绝消息，其余给取消消息），避免 tools 节点重复执行
+        """
+        await self._ensure_checkpointer()
+        agent = self._build_agent()
+        thread_config = {"configurable": {"thread_id": session_id}}
+
+        # 拒绝时注入 ToolMessage（覆盖所有待执行 tool_calls，防止恢复时重复执行）
+        if rejected_tool_id:
+            snapshot = await agent.aget_state(thread_config)
+            rejection_messages = []
+            for msg in reversed(snapshot.values.get("messages", [])):
+                if isinstance(msg, AIMessage) and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        content = (
+                            "用户拒绝了此工具调用"
+                            if tc["id"] == rejected_tool_id
+                            else "工具调用因关联审批被拒而取消"
+                        )
+                        rejection_messages.append(
+                            ToolMessage(
+                                content=content,
+                                tool_call_id=tc["id"],
+                            )
+                        )
+                    break
+
+            if rejection_messages:
+                await agent.aupdate_state(
+                    thread_config,
+                    {"messages": rejection_messages},
+                    as_node="tools",
+                )
+
+        async for event in self._stream_events(agent, thread_config, session_id, None):
+            yield event
 
     def _schedule_mem0_write(
         self, user_message: str, assistant_message: str, mem0_cfg: dict
