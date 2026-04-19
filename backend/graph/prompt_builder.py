@@ -1,7 +1,7 @@
 """Prompt Builder — 三段式系统提示构建（Cache Zone 分离）。
 
 Zone 1（极稳定层）：SOUL.md + IDENTITY.md + USER.md
-Zone 2（低频变化层）：AGENTS.md + 精简技能摘要
+Zone 2（低频变化层）：AGENTS.md + 精简技能摘要 + Level 3 预加载技能
 Zone 3（高频变化层）：由 UnifiedMemoryRetriever / TaskState 按需注入
 
 Zone 1+2 合并为 build_stable_prefix()，workspace 文件不变时输出逐字符一致。
@@ -10,10 +10,14 @@ Zone 3 不在此处生成，而是由 agent.py 在请求时动态注入。
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 MAX_COMPONENT_LENGTH = 20000
+PRELOAD_MAX_TOTAL = 60000
 
 # 确定性模板：每个区域使用固定占位符，确保相同输入产生相同输出
 _TEMPLATE = """<!-- Zone 1: Stable -->
@@ -22,7 +26,8 @@ _TEMPLATE = """<!-- Zone 1: Stable -->
 {user_profile}
 <!-- Zone 2: Low-frequency -->
 {agents_guide}
-{skills_snapshot}"""
+{skills_snapshot}
+{preload_skills}"""
 
 
 def _read_component(path: Path) -> str:
@@ -55,7 +60,7 @@ def build_stable_prefix(
 
     Args:
         base_dir: 项目根目录
-        skill_registry: SkillRegistry 实例，用于生成精简技能摘要
+        skill_registry: SkillRegistry 实例，用于生成精简技能摘要和预加载技能
 
     Returns:
         系统提示的稳定部分，workspace 文件不变时输出逐字符一致。
@@ -70,8 +75,10 @@ def build_stable_prefix(
 
     if skill_registry is not None:
         skills_snapshot = skill_registry.build_compact_snapshot()
+        preload_skills = _build_preload_section(base_dir, skill_registry)
     else:
         skills_snapshot = ""
+        preload_skills = ""
 
     return _TEMPLATE.format(
         soul=soul,
@@ -79,7 +86,46 @@ def build_stable_prefix(
         user_profile=user_profile,
         agents_guide=agents_guide,
         skills_snapshot=skills_snapshot,
+        preload_skills=preload_skills,
     )
+
+
+def _build_preload_section(base_dir: Path, skill_registry: Any) -> str:
+    """构建 Level 3 预加载技能的 Zone 2 内容。
+
+    遍历所有 inject_system_prompt=true 的技能，读取完整 SKILL.md
+    注入 Zone 2。总量超过 PRELOAD_MAX_TOTAL 时 log.warning 并截断。
+    """
+    preload_skills = skill_registry.get_preload_skills()
+    if not preload_skills:
+        return ""
+
+    parts: list[str] = []
+    total_chars = 0
+
+    for skill in preload_skills:
+        skill_path = base_dir / "skills" / skill.name / "SKILL.md"
+        content = _read_component(skill_path)
+        if not content:
+            continue
+
+        section = f"### 预加载技能: {skill.name}\n{content}"
+        total_chars += len(section)
+
+        if total_chars > PRELOAD_MAX_TOTAL:
+            logger.warning(
+                "预加载技能内容超过 %d 字符，截断剩余技能",
+                PRELOAD_MAX_TOTAL,
+            )
+            remaining = PRELOAD_MAX_TOTAL - (total_chars - len(section))
+            if remaining > 100:
+                section = f"### 预加载技能: {skill.name}\n{content[:remaining]}"
+                parts.append(section)
+            break
+
+        parts.append(section)
+
+    return "\n\n".join(parts)
 
 
 def build_system_prompt(base_dir: Path, rag_mode: bool = False) -> str:

@@ -113,6 +113,47 @@ class TestSkillRegistry:
         assert "visible" in snapshot
         assert "hidden" not in snapshot
 
+    def test_snapshot_with_trigger_patterns(self, registry):
+        """有触发词的技能追加 [触发: ...] 格式。"""
+        registry.register(SkillMeta(
+            name="get_weather", description="获取天气信息",
+            metadata={"trigger_patterns": "天气,气温"},
+        ))
+        snapshot = registry.build_compact_snapshot()
+        assert "- get_weather: 获取天气信息 [触发: 天气/气温]" in snapshot
+
+    def test_snapshot_without_trigger_patterns(self, registry):
+        """无触发词的技能不追加空括号。"""
+        registry.register(SkillMeta(name="simple", description="简单技能"))
+        snapshot = registry.build_compact_snapshot()
+        assert "- simple: 简单技能" in snapshot
+        assert "[触发:" not in snapshot
+
+    def test_snapshot_triggers_limited_to_three(self, registry):
+        """触发词超过 3 个时只显示前 3 个。"""
+        registry.register(SkillMeta(
+            name="multi", description="多触发词技能",
+            metadata={"trigger_patterns": "天气,气温,温度,下雨,晴"},
+        ))
+        snapshot = registry.build_compact_snapshot()
+        assert "[触发: 天气/气温/温度]" in snapshot
+        assert "下雨" not in snapshot
+
+    def test_get_preload_skills(self, registry):
+        """get_preload_skills 仅返回 inject_system_prompt=true 的技能。"""
+        registry.register(SkillMeta(
+            name="preload", description="预加载技能",
+            metadata={"inject_system_prompt": "true"},
+        ))
+        registry.register(SkillMeta(
+            name="normal", description="普通技能",
+            metadata={"inject_system_prompt": "false"},
+        ))
+        registry.register(SkillMeta(name="default", description="默认技能"))
+        preload = registry.get_preload_skills()
+        assert len(preload) == 1
+        assert preload[0].name == "preload"
+
 
 class TestSkillRegistryDiscover:
     def test_discover_real_skills(self):
@@ -190,3 +231,44 @@ class TestSkillRegistryDiscover:
             skill = registry.skills["simple-skill"]
             assert skill.is_auto_invocable is True  # 默认 auto
             assert skill.trigger_patterns == []  # 无引号，无触发词
+
+
+class TestPreloadInjection:
+    """Level 3 预加载注入测试。"""
+
+    def test_build_stable_prefix_includes_preload_skill(self):
+        """有预加载技能时 Zone 2 包含完整内容。"""
+        from graph.prompt_builder import build_stable_prefix
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "workspace").mkdir()
+            (base / "workspace" / "SOUL.md").write_text("灵魂", encoding="utf-8")
+            (base / "skills" / "preload-skill").mkdir(parents=True)
+            (base / "skills" / "preload-skill" / "SKILL.md").write_text(
+                "---\nname: preload-skill\ndescription: 预加载\nmetadata:\n  inject_system_prompt: 'true'\n---\n\n预加载完整内容",
+                encoding="utf-8",
+            )
+
+            registry = SkillRegistry.discover(base / "skills")
+            result = build_stable_prefix(base, skill_registry=registry)
+            assert "### 预加载技能: preload-skill" in result
+            assert "预加载完整内容" in result
+
+    def test_build_stable_prefix_no_preload_unchanged(self):
+        """无预加载技能时 Zone 2 不变。"""
+        from graph.prompt_builder import build_stable_prefix
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "workspace").mkdir()
+            (base / "workspace" / "SOUL.md").write_text("灵魂", encoding="utf-8")
+            (base / "skills" / "normal-skill").mkdir(parents=True)
+            (base / "skills" / "normal-skill" / "SKILL.md").write_text(
+                "---\nname: normal-skill\ndescription: 普通\n---\n\n普通内容",
+                encoding="utf-8",
+            )
+
+            registry = SkillRegistry.discover(base / "skills")
+            result = build_stable_prefix(base, skill_registry=registry)
+            assert "### 预加载技能" not in result

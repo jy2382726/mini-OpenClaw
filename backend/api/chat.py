@@ -1,6 +1,7 @@
 """POST /api/chat — SSE streaming chat with Agent."""
 
 import json
+import logging
 import traceback
 from typing import AsyncGenerator
 
@@ -11,6 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from graph.agent import agent_manager
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
@@ -93,8 +95,8 @@ async def event_generator(message: str, session_id: str) -> AsyncGenerator[dict,
             repo = await agent_manager.get_session_repo()
             await repo.bootstrap_if_missing(session_id)
             await repo.touch(session_id)
-        except Exception:
-            pass  # 元数据操作失败不应阻塞对话
+        except Exception as e:
+            logger.warning("会话元数据操作失败 session_id=%s: %s", session_id, e)
 
         # 判断是否首条消息：通过 checkpoint 检查是否已有消息
         from graph.checkpoint_history import CheckpointHistoryService

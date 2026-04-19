@@ -74,6 +74,10 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "task_state": True,
         "unified_memory": True,
     },
+    "auxiliary_model": {
+        "model": "qwen3.5-flash",
+        "temperature": 0,
+    },
     "mem0": {
         "enabled": False,
         "mode": "legacy",  # "legacy" | "mem0" | "hybrid"
@@ -158,38 +162,16 @@ def set_rag_mode(enabled: bool) -> None:
 
 
 def get_auxiliary_model_config() -> dict[str, Any]:
-    """获取辅助模型配置，含向后兼容优先级链。
+    """获取辅助模型配置（摘要、标题生成、记忆提取等统一使用）。
 
-    优先级：auxiliary_model > summary_model > mem0.extraction_model > 默认值。
+    配置来源：config.json 的 auxiliary_model 段，缺省使用 _DEFAULT_CONFIG。
     """
     config = load_config()
-
-    # 最高优先级：新的 auxiliary_model 配置
-    aux_cfg = config.get("auxiliary_model")
-    if aux_cfg and aux_cfg.get("model"):
-        return {
-            "model": aux_cfg["model"],
-            "temperature": aux_cfg.get("temperature", 0),
-        }
-
-    # 次优先级：旧的 summary_model 配置
-    summary_cfg = config.get("summary_model")
-    if summary_cfg and summary_cfg.get("model"):
-        return {
-            "model": summary_cfg["model"],
-            "temperature": summary_cfg.get("temperature", 0),
-        }
-
-    # 第三优先级：mem0.extraction_model 的 model 字段
-    mem0_extraction = config.get("mem0", {}).get("extraction_model") or {}
-    if mem0_extraction.get("model"):
-        return {
-            "model": mem0_extraction["model"],
-            "temperature": 0,
-        }
-
-    # 默认值
-    return {"model": "qwen3.5-flash", "temperature": 0}
+    aux_cfg = config.get("auxiliary_model", _DEFAULT_CONFIG["auxiliary_model"])
+    return {
+        "model": aux_cfg.get("model", _DEFAULT_CONFIG["auxiliary_model"]["model"]),
+        "temperature": aux_cfg.get("temperature", _DEFAULT_CONFIG["auxiliary_model"]["temperature"]),
+    }
 
 
 def create_auxiliary_llm():
@@ -283,7 +265,7 @@ def get_settings_for_display() -> dict[str, Any]:
             **config.get("rag", {}),
         },
         "compression": config.get("compression", {}),
-        "auxiliary_model": config.get("auxiliary_model", {"model": "qwen3.5-flash", "temperature": 0}),
+        "auxiliary_model": config.get("auxiliary_model", _DEFAULT_CONFIG["auxiliary_model"]),
         "summary_model": config.get("summary_model", _DEFAULT_CONFIG["summary_model"]),
         "middleware": get_middleware_config(),
         "features": get_features_config(),

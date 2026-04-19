@@ -1,8 +1,7 @@
 """辅助模型统一配置测试 — 覆盖 get_auxiliary_model_config() 和 create_auxiliary_llm()。
 
 验证：
-- 优先级链：auxiliary_model > summary_model > mem0.extraction_model > 默认值
-- 向后兼容：旧 summary_model 配置仍能正常工作
+- 统一辅助模型：auxiliary_model 配置段为唯一来源，缺省使用 _DEFAULT_CONFIG
 - 工厂函数降级策略：无 API key 返回 None、构造异常返回 None
 """
 
@@ -40,20 +39,15 @@ class _ConfigFixture(unittest.TestCase):
             _BACKUP_CONFIG.unlink()
 
 
-# ─── Task 4.1: get_auxiliary_model_config() 向后兼容测试 ────────────────────
-
-
-class TestGetAuxiliaryModelConfigPriority(_ConfigFixture):
-    """优先级链测试：auxiliary_model > summary_model > mem0.extraction_model > 默认值。"""
+class TestGetAuxiliaryModelConfig(_ConfigFixture):
+    """统一辅助模型配置测试。"""
 
     @patch("config.CONFIG_FILE")
-    def test_priority_1_auxiliary_model(self, mock_path):
-        """最高优先级：auxiliary_model 配置。"""
+    def test_custom_auxiliary_model(self, mock_path):
+        """用户配置了 auxiliary_model 时使用自定义值。"""
         mock_path.exists.return_value = True
         mock_path.read_text.return_value = json.dumps({
             "auxiliary_model": {"model": "qwen3.5-plus", "temperature": 0.5},
-            "summary_model": {"model": "qwen-turbo", "temperature": 0},
-            "mem0": {"extraction_model": {"model": "qwen-plus"}},
         })
 
         from config import get_auxiliary_model_config
@@ -63,66 +57,9 @@ class TestGetAuxiliaryModelConfigPriority(_ConfigFixture):
         self.assertEqual(result["temperature"], 0.5)
 
     @patch("config.CONFIG_FILE")
-    def test_priority_2_summary_model_fallback(self, mock_path):
-        """次优先级：auxiliary_model 未配置时回退到 summary_model。"""
-        mock_path.exists.return_value = True
-        # auxiliary_model 不存在或 model 为空
-        mock_path.read_text.return_value = json.dumps({
-            "summary_model": {"model": "qwen-turbo", "temperature": 0.3},
-            "mem0": {"extraction_model": {"model": "qwen-plus"}},
-        })
-
-        from config import get_auxiliary_model_config
-        result = get_auxiliary_model_config()
-
-        self.assertEqual(result["model"], "qwen-turbo")
-        self.assertEqual(result["temperature"], 0.3)
-
-    @patch("config.CONFIG_FILE")
-    def test_priority_2_summary_model_empty_auxiliary(self, mock_path):
-        """auxiliary_model 存在但 model 为空时回退到 summary_model。"""
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = json.dumps({
-            "auxiliary_model": {"model": "", "temperature": 0},
-            "summary_model": {"model": "qwen-turbo", "temperature": 0},
-        })
-
-        from config import get_auxiliary_model_config
-        result = get_auxiliary_model_config()
-
-        self.assertEqual(result["model"], "qwen-turbo")
-
-    @patch("config.CONFIG_FILE")
-    def test_priority_3_mem0_extraction_model(self, mock_path):
-        """第三优先级：auxiliary_model 和 summary_model.model 都为空时回退到 mem0.extraction_model。
-
-        注意：_DEFAULT_CONFIG 包含 summary_model 默认值，_deep_merge 会合并它，
-        所以需要显式设置 summary_model.model 为空才能穿透到第三优先级。
-        """
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = json.dumps({
-            "summary_model": {"model": "", "temperature": 0},
-            "mem0": {"extraction_model": {"model": "qwen-plus", "max_tokens": 256}},
-        })
-
-        from config import get_auxiliary_model_config
-        result = get_auxiliary_model_config()
-
-        self.assertEqual(result["model"], "qwen-plus")
-        self.assertEqual(result["temperature"], 0)
-
-    @patch("config.CONFIG_FILE")
-    def test_priority_4_default(self, mock_path):
-        """最低优先级：所有 model 配置都为空时使用默认值。
-
-        注意：_DEFAULT_CONFIG 包含 summary_model 默认值，需显式清空。
-        实际生产环境中 summary_model 始终存在，此测试验证极端边界场景。
-        """
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = json.dumps({
-            "summary_model": {"model": "", "temperature": 0},
-            "mem0": {"extraction_model": {}},
-        })
+    def test_default_when_no_config(self, mock_path):
+        """配置文件不存在时使用 _DEFAULT_CONFIG 中的 auxiliary_model 默认值。"""
+        mock_path.exists.return_value = False
 
         from config import get_auxiliary_model_config
         result = get_auxiliary_model_config()
@@ -131,42 +68,17 @@ class TestGetAuxiliaryModelConfigPriority(_ConfigFixture):
         self.assertEqual(result["temperature"], 0)
 
     @patch("config.CONFIG_FILE")
-    def test_priority_4_default_no_file(self, mock_path):
-        """配置文件不存在时使用 _DEFAULT_CONFIG 合并后的值。
-
-        由于 _DEFAULT_CONFIG 包含 summary_model.model=qwen-turbo，
-        无文件时优先级链在第二级命中，不会到达默认值 qwen3.5-flash。
-        这是 _deep_merge 合并机制决定的预期行为。
-        """
-        mock_path.exists.return_value = False
-
-        from config import get_auxiliary_model_config
-        result = get_auxiliary_model_config()
-
-        # _DEFAULT_CONFIG 中 summary_model.model = "qwen-turbo"
-        self.assertEqual(result["model"], "qwen-turbo")
-
-    @patch("config.CONFIG_FILE")
-    def test_backward_compat_summary_model_migration(self, mock_path):
-        """向后兼容测试：旧 config.json 只有 summary_model 配置，迁移后仍正常工作。"""
+    def test_default_when_empty_config(self, mock_path):
+        """配置文件无 auxiliary_model 段时使用默认值。"""
         mock_path.exists.return_value = True
-        # 模拟旧版配置：没有 auxiliary_model，只有 summary_model
         mock_path.read_text.return_value = json.dumps({
-            "llm": {
-                "model": "qwen3.5-plus",
-                "api_key": "sk-test",
-                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            },
-            "summary_model": {
-                "model": "qwen-turbo",
-                "temperature": 0,
-            },
+            "llm": {"model": "qwen3.5-plus"},
         })
 
         from config import get_auxiliary_model_config
         result = get_auxiliary_model_config()
 
-        self.assertEqual(result["model"], "qwen-turbo")
+        self.assertEqual(result["model"], "qwen3.5-flash")
         self.assertEqual(result["temperature"], 0)
 
     @patch("config.CONFIG_FILE")
@@ -182,8 +94,19 @@ class TestGetAuxiliaryModelConfigPriority(_ConfigFixture):
 
         self.assertEqual(result["temperature"], 0)
 
+    @patch("config.CONFIG_FILE")
+    def test_model_only_uses_auxiliary_model(self, mock_path):
+        """辅助模型只看 auxiliary_model 配置，不回退到 summary_model。"""
+        mock_path.exists.return_value = True
+        mock_path.read_text.return_value = json.dumps({
+            "summary_model": {"model": "qwen-turbo", "temperature": 0},
+        })
 
-# ─── Task 4.2: create_auxiliary_llm() 工厂函数测试 ─────────────────────────
+        from config import get_auxiliary_model_config
+        result = get_auxiliary_model_config()
+
+        # 不回退到 summary_model，使用 auxiliary_model 默认值
+        self.assertEqual(result["model"], "qwen3.5-flash")
 
 
 class TestCreateAuxiliaryLlm(_ConfigFixture):

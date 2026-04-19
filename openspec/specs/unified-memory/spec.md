@@ -53,15 +53,27 @@
 
 过滤通过 `_result_score()` 函数实现，优先取 `confidence` 字段，其次取 `score` 字段作为排序/过滤依据。
 
-#### Scenario: 高分记忆被注入
+MEMORY.md 段落的评分 MUST 使用动态评分：`score = 0.3 + 0.4 * (matched_keywords / total_query_keywords)`，其中 `matched_keywords` 为段落中命中的查询关键词数量，`total_query_keywords` 为查询关键词总数。score MUST 为 float 类型。
 
-- **WHEN** 检索到置信度 0.9 的 mem0 记忆
-- **THEN** 该记忆条目（分数 0.9 > 0.3 阈值）MUST 被注入到请求上下文中
+#### Scenario: 高匹配度段落获得高分
 
-#### Scenario: 低分记忆被过滤
+- **WHEN** 查询包含 3 个关键词，MEMORY.md 某段落匹配其中 3 个（覆盖率 100%）
+- **THEN** 该段落 score MUST 为 `0.3 + 0.4 * 1.0 = 0.7`，通过 0.3 阈值被注入
 
-- **WHEN** 检索到置信度 0.1 的 mem0 记忆
-- **THEN** 该记忆条目（分数 0.1 < 0.3 阈值）MUST NOT 被注入，减少无关 token 开销
+#### Scenario: 低匹配度段落获得低分
+
+- **WHEN** 查询包含 5 个关键词，MEMORY.md 某段落仅匹配其中 1 个（覆盖率 20%）
+- **THEN** 该段落 score MUST 为 `0.3 + 0.4 * 0.2 = 0.38`，分数低于固定 0.5，但仍通过 0.3 阈值
+
+#### Scenario: 未匹配任何关键词的段落不返回
+
+- **WHEN** MEMORY.md 某段落不包含任何查询关键词
+- **THEN** 该段落 MUST NOT 出现在检索结果中（保持当前行为）
+
+#### Scenario: 单关键词查询全覆盖
+
+- **WHEN** 查询仅包含 1 个关键词，段落匹配该关键词
+- **THEN** 该段落 score MUST 为 `0.3 + 0.4 * 1.0 = 0.7`，高相关度通过过滤
 
 ### Requirement: 对话缓冲区（MemoryBuffer）
 

@@ -568,6 +568,32 @@ class TestArchiving:
         # 归档目录不存在（没有触发归档）
         assert not (tmp_path / "archive").exists()
 
+    @pytest.mark.asyncio
+    async def test_archive_filename_contains_session_id(self, tmp_path):
+        """归档文件名包含 session_id。"""
+        mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
+        huge_output = "H" * 15000
+        result = mw._archive_output(huge_output, "terminal", "sess-test123")
+        assert "tool_terminal_sess-test123_" in result
+
+        archive_files = list((tmp_path / "archive").glob("tool_terminal_sess-test123_*.txt"))
+        assert len(archive_files) == 1
+
+    @pytest.mark.asyncio
+    async def test_archive_write_failure_degrades_to_truncation(self, tmp_path):
+        """归档写入失败时降级为纯截断，不含归档路径。"""
+        from unittest.mock import patch
+
+        mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
+        huge_output = "H" * 15000
+
+        with patch("pathlib.Path.write_text", side_effect=OSError("磁盘满")):
+            result = mw._archive_output(huge_output, "terminal", "sess-fail")
+
+        # 应为纯截断结果，不含归档路径
+        assert "完整输出已归档到" not in result
+        assert "已截断" in result
+
 
 # ═══════════════════════════════════════════════════════════════
 # 辅助函数测试（保留）
@@ -814,3 +840,74 @@ class TestMiddlewareConfigToggles:
         feat = get_features_config()
         assert feat["task_state"] is True
         assert feat["unified_memory"] is True
+
+
+# ═══════════════════════════════════════════════════════════════
+# 归档文件级联清理 + GC 测试
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestCleanupSessionArchives:
+    """_cleanup_session_archives 测试。"""
+
+    def test_deletes_matching_session_files(self, tmp_path, monkeypatch):
+        """删除指定 session_id 的归档文件。"""
+        from api.sessions import _cleanup_session_archives
+
+        archive_dir = tmp_path / "sessions" / "archive"
+        archive_dir.mkdir(parents=True)
+        monkeypatch.setattr("api.sessions.ARCHIVE_DIR", archive_dir)
+
+        # 创建目标 session 的文件和其他 session 的文件
+        (archive_dir / "tool_terminal_sess-target_100.txt").write_text("data")
+        (archive_dir / "tool_read_file_sess-target_101.txt").write_text("data")
+        (archive_dir / "tool_terminal_sess-other_200.txt").write_text("data")
+
+        _cleanup_session_archives("sess-target")
+
+        assert not (archive_dir / "tool_terminal_sess-target_100.txt").exists()
+        assert not (archive_dir / "tool_read_file_sess-target_101.txt").exists()
+        assert (archive_dir / "tool_terminal_sess-other_200.txt").exists()
+
+    def test_noop_when_archive_dir_missing(self, tmp_path, monkeypatch):
+        """archive 目录不存在时静默返回。"""
+        from api.sessions import _cleanup_session_archives
+
+        monkeypatch.setattr("api.sessions.ARCHIVE_DIR", tmp_path / "nonexistent")
+        _cleanup_session_archives("sess-any")  # 不应报错
+
+
+class TestGcExpiredArchives:
+    """_gc_expired_archives 测试。"""
+
+    def test_deletes_old_files_keeps_recent(self, tmp_path, monkeypatch):
+        """删除超期文件、保留未超期文件。"""
+        import time
+        from app import _gc_expired_archives
+
+        archive_dir = tmp_path / "sessions" / "archive"
+        archive_dir.mkdir(parents=True)
+        monkeypatch.setattr("app.BASE_DIR", tmp_path)
+
+        # 创建超期文件（8 天前）
+        old_file = archive_dir / "tool_terminal_old_100.txt"
+        old_file.write_text("old")
+        import os
+        old_mtime = time.time() - 8 * 86400
+        os.utime(old_file, (old_mtime, old_mtime))
+
+        # 创建未超期文件（1 天前）
+        recent_file = archive_dir / "tool_terminal_recent_200.txt"
+        recent_file.write_text("recent")
+
+        _gc_expired_archives(max_age_days=7)
+
+        assert not old_file.exists()
+        assert recent_file.exists()
+
+    def test_handles_nonexistent_dir(self, tmp_path, monkeypatch):
+        """archive 目录不存在时静默返回。"""
+        from app import _gc_expired_archives
+
+        monkeypatch.setattr("app.BASE_DIR", tmp_path)
+        _gc_expired_archives()  # 不应报错

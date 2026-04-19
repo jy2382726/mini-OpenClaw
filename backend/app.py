@@ -1,6 +1,8 @@
 """Mini-OpenClaw Backend — FastAPI Entry Point"""
 
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,6 +14,25 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 
+logger = logging.getLogger(__name__)
+
+
+def _gc_expired_archives(max_age_days: int = 7) -> None:
+    """清理 sessions/archive/ 下超过 max_age_days 的归档文件。
+
+    同时清理新旧两种格式。GC 失败不阻塞启动。
+    """
+    archive_dir = BASE_DIR / "sessions" / "archive"
+    if not archive_dir.exists():
+        return
+    try:
+        cutoff = time.time() - max_age_days * 86400
+        for f in archive_dir.glob("*.txt"):
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+    except Exception:
+        logger.warning("归档文件 GC 失败", exc_info=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,6 +40,9 @@ async def lifespan(app: FastAPI):
     from graph.skill_registry import SkillRegistry
     from graph.agent import agent_manager
     from graph.memory_indexer import get_memory_indexer
+
+    # 启动时清理过期归档文件
+    _gc_expired_archives()
 
     # 使用 SkillRegistry 替代旧的 scan_skills
     registry = SkillRegistry.discover(BASE_DIR / "skills")

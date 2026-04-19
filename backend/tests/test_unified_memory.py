@@ -288,3 +288,67 @@ class TestResultScore:
 
     def test_confidence_takes_priority(self):
         assert _result_score({"confidence": 0.9, "score": "0.1"}) == 0.9
+
+
+class TestMemoryMdDynamicScoring:
+    """MEMORY.md 段落动态评分测试。"""
+
+    def test_full_match_gets_highest_score(self):
+        """全匹配段落 score 为 0.7。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = Path(tmpdir) / "MEMORY.md"
+            md_path.write_text("用户住在北京\n", encoding="utf-8")
+            retriever = UnifiedMemoryRetriever(memory_md_path=md_path)
+            results = retriever.retrieve("用户 住在 北京")
+            assert len(results) == 1
+            assert results[0]["score"] == pytest.approx(0.7)
+
+    def test_partial_match_gets_lower_score(self):
+        """部分匹配段落 score 低于全匹配段落。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = Path(tmpdir) / "MEMORY.md"
+            md_path.write_text(
+                "用户住在北京\n\n用户喜欢 Python\n",
+                encoding="utf-8",
+            )
+            retriever = UnifiedMemoryRetriever(memory_md_path=md_path)
+            results = retriever.retrieve("用户 住在 喜欢 Python")
+            assert len(results) == 2
+            # "用户喜欢 Python" 匹配 3/4 个关键词 → 0.3 + 0.4*0.75 = 0.6
+            # "用户住在北京" 匹配 2/4 个关键词 → 0.3 + 0.4*0.5 = 0.5
+            scores = {r["text"]: r["score"] for r in results}
+            assert scores["用户喜欢 Python"] == pytest.approx(0.6)
+            assert scores["用户住在北京"] == pytest.approx(0.5)
+
+    def test_single_keyword_match_gets_0_7(self):
+        """单关键词查询匹配段落 score 为 0.7。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = Path(tmpdir) / "MEMORY.md"
+            md_path.write_text("深色主题设置\n", encoding="utf-8")
+            retriever = UnifiedMemoryRetriever(memory_md_path=md_path)
+            results = retriever.retrieve("深色")
+            assert len(results) == 1
+            assert results[0]["score"] == pytest.approx(0.7)
+
+    def test_unmatched_paragraph_not_returned(self):
+        """未匹配任何关键词的段落不出现在结果中。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = Path(tmpdir) / "MEMORY.md"
+            md_path.write_text(
+                "用户住在北京\n\n系统配置信息\n",
+                encoding="utf-8",
+            )
+            retriever = UnifiedMemoryRetriever(memory_md_path=md_path)
+            results = retriever.retrieve("用户 住在")
+            assert len(results) == 1
+            assert "用户住在北京" in results[0]["text"]
+
+    def test_score_is_float_type(self):
+        """score 类型为 float 而非字符串。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = Path(tmpdir) / "MEMORY.md"
+            md_path.write_text("测试段落\n", encoding="utf-8")
+            retriever = UnifiedMemoryRetriever(memory_md_path=md_path)
+            results = retriever.retrieve("测试")
+            assert len(results) == 1
+            assert isinstance(results[0]["score"], float)

@@ -116,6 +116,10 @@ class SkillRegistry:
         """获取 Agent 可自动调用的技能（用于系统提示注入 Level 1）。"""
         return [s for s in self.skills.values() if s.is_auto_invocable]
 
+    def get_preload_skills(self) -> list[SkillMeta]:
+        """获取需要完整注入系统提示的技能（Level 3 预加载）。"""
+        return [s for s in self.skills.values() if s.inject_system_prompt]
+
     def find_by_trigger(self, user_message: str) -> list[SkillMeta]:
         """根据用户消息匹配可能触发的技能。"""
         matches = []
@@ -134,12 +138,16 @@ class SkillRegistry:
     def build_compact_snapshot(self) -> str:
         """构建精简快照（用于系统提示 Zone 2）。
 
-        仅列出可自动调用技能的名称和描述，
-        替代当前 XML 全量快照格式。
+        仅列出可自动调用技能的名称和描述。
+        有触发词时追加 [触发: 关键词1/关键词2]，最多 3 个。
         """
         lines = ["## 可用技能（按需读取 SKILL.md 获取详情）"]
         for skill in self.get_auto_invocable_skills():
-            lines.append(f"- {skill.name}: {skill.description}")
+            line = f"- {skill.name}: {skill.description}"
+            if skill.trigger_patterns:
+                triggers = "/".join(skill.trigger_patterns[:3])
+                line += f" [触发: {triggers}]"
+            lines.append(line)
         return "\n".join(lines)
 
     @classmethod

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langgraph.config import get_config
+
+logger = logging.getLogger(__name__)
 
 # 各工具类型的 token 预算（1 token ≈ 4 字符）
 TOOL_OUTPUT_BUDGETS: dict[str, int] = {
@@ -113,16 +117,27 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
         omitted = len(content) - head_len - tail_len
         return f"{head}\n...[省略约 {omitted} 字符]...\n{tail}"
 
-    def _archive_output(self, content: str, tool_name: str) -> str:
-        """归档超大输出到文件，返回摘要 + 文件路径引用。"""
+    def _archive_output(self, content: str, tool_name: str, session_id: str = "unknown") -> str:
+        """归档超大输出到文件，返回摘要 + 文件路径引用。
+
+        写入失败时降级为纯截断，不向上抛出异常。
+        """
         archive_dir = self._base_dir / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = int(time.time())
-        filename = f"tool_{tool_name}_{timestamp}.txt"
+        filename = f"tool_{tool_name}_{session_id}_{timestamp}.txt"
         filepath = archive_dir / filename
 
-        filepath.write_text(content, encoding="utf-8")
+        try:
+            filepath.write_text(content, encoding="utf-8")
+        except (OSError, PermissionError, IOError):
+            logger.warning("归档写入失败 %s，降级为纯截断", filepath)
+            # 降级为纯截断
+            summary_budget = 500 * 4
+            if len(content) > summary_budget:
+                return content[: summary_budget * 2 // 3] + "\n...[已截断]..."
+            return content
 
         # 生成截断摘要（约 500 token）
         summary_budget = 500 * 4
@@ -137,6 +152,13 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
         messages = state.get("messages", [])
         if not messages:
             return None
+
+        # 从 graph config 获取 session_id（thread_id）
+        try:
+            config = get_config()
+            session_id = config.get("configurable", {}).get("thread_id", "unknown")
+        except RuntimeError:
+            session_id = "unknown"
 
         total_tokens = self._estimate_tokens(messages)
         safe = int(self._context_window * self._safe_ratio)
@@ -170,7 +192,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
 
                 # Level 3: 归档超大输出（优先于普通截断）
                 if len(content) > archive_threshold * 4:
-                    archived = self._archive_output(content, msg.name)
+                    archived = self._archive_output(content, msg.name, session_id)
                     msg = msg.model_copy(update={"content": archived})
                     changed = True
                 # Level 1/2: 按策略截断

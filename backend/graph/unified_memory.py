@@ -147,6 +147,7 @@ class UnifiedMemoryRetriever:
         """直接读取 MEMORY.md 文件，按关键词匹配段落。
 
         仅在其他源结果不足时作为补充，使用简单的关键词匹配。
+        评分公式: 0.3 + 0.4 * (matched_keywords / total_query_keywords)
         """
         if not self._memory_md_path or not self._memory_md_path.exists():
             return []
@@ -159,13 +160,18 @@ class UnifiedMemoryRetriever:
             paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
             query_words = [w for w in query.lower().split() if len(w) > 1]
 
+            if not query_words:
+                return []
+
             results: list[dict[str, Any]] = []
             for para in paragraphs:
                 para_lower = para.lower()
-                if any(w in para_lower for w in query_words):
+                matched = sum(1 for w in query_words if w in para_lower)
+                if matched > 0:
+                    score = 0.3 + 0.4 * (matched / len(query_words))
                     results.append({
                         "text": para,
-                        "score": "0.5",
+                        "score": score,
                         "source": "MEMORY.md",
                     })
             return results

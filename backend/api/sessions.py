@@ -3,6 +3,7 @@
 数据源：SessionRepository（SQLite 元数据）+ CheckpointHistoryService（消息投影）。
 """
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -13,9 +14,26 @@ from graph.agent import agent_manager
 from graph.checkpoint_history import CheckpointDebugViewService, CheckpointHistoryService
 from graph.prompt_builder import build_system_prompt
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+ARCHIVE_DIR = BASE_DIR / "sessions" / "archive"
+
+
+def _cleanup_session_archives(session_id: str) -> None:
+    """删除 sessions/archive/ 下匹配 session_id 的归档文件。
+
+    清理失败时 log.warning，不阻塞调用方。
+    """
+    if not ARCHIVE_DIR.exists():
+        return
+    try:
+        for f in ARCHIVE_DIR.glob(f"tool_*_{session_id}_*.txt"):
+            f.unlink(missing_ok=True)
+    except Exception:
+        logger.warning("归档文件清理失败: session_id=%s", session_id, exc_info=True)
 
 
 # ── Request models ──────────────────────────────────────────
@@ -67,6 +85,9 @@ async def delete_session(session_id: str):
     checkpointer = await agent_manager._ensure_checkpointer()
     if hasattr(checkpointer, "adelete_thread"):
         await checkpointer.adelete_thread(session_id)
+
+    # 级联清理归档文件
+    _cleanup_session_archives(session_id)
 
     return {"status": "deleted", "id": session_id}
 
@@ -165,6 +186,9 @@ async def clear_session_messages(session_id: str):
     checkpointer = await agent_manager._ensure_checkpointer()
     if hasattr(checkpointer, "adelete_thread"):
         await checkpointer.adelete_thread(session_id)
+
+    # 级联清理归档文件
+    _cleanup_session_archives(session_id)
 
     return {"status": "cleared", "session_id": session_id}
 
