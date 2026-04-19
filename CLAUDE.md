@@ -20,7 +20,7 @@ python -m uvicorn app:app --reload --host 0.0.0.0 --port 8002
 
 # 前端 (frontend/)
 npm install
-npm run dev -- --H 0.0.0.0 --port 3000
+npm run dev -- -H 0.0.0.0 --port 3000
 npm run lint && npm run build
 
 # 一键启动

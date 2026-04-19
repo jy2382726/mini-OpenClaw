@@ -1,12 +1,12 @@
 {
-  "rag_mode": true,
+  "rag_mode": false,
   "llm": {
     "provider": "dashscope",
     "model": "qwen3.5-plus",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "api_key": "sk-4dfa4c7c18bd41fa994ad0fd2557deab",
+    "api_key": "",
     "temperature": 0.7,
-    "max_tokens": 8096,
+    "max_tokens": 4096,
     "context_window": 131072
   },
   "embedding": {
@@ -59,9 +59,23 @@
     "task_state": true,
     "unified_memory": true
   },
+  "auxiliary_model": {
+    "model": "qwen3.5-flash",
+    "temperature": 0
+  },
+  "hitl": {
+    "enabled": true,
+    "approval_required": [
+      "terminal",
+      "write_file",
+      "python_repl"
+    ],
+    "timeout_seconds": 30,
+    "timeout_action": "reject"
+  },
   "mem0": {
     "enabled": true,
-    "mode": "mem0",
+    "mode": "legacy",
     "auto_extract": true,
     "user_id": "default",
     "buffer_size": 5,
@@ -71,16 +85,6 @@
     "stale_threshold_days": 7,
     "expire_threshold_days": 30,
     "min_confidence": 0.3,
-    "extraction_model": {
-      "model": "qwen3.5-flash",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key": "",
-      "max_tokens": 512,
-      "enable_thinking": false
-    }
-  },
-  "auxiliary_model": {
-    "model": "qwen3.5-flash",
-    "temperature": 0
+    "extraction_model": {}
   }
 }
