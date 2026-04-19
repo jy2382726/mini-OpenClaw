@@ -30,33 +30,24 @@ BACKEND_PORT=9000 FRONTEND_PORT=4000 ./scripts/start-macos-linux.sh
 
 ## 架构
 
-**后端** (`backend/`):
-- `app.py` — FastAPI 入口，启动时扫描技能、初始化 Agent、构建 RAG 索引
-- `config.py` — JSON 配置持久化（`config.json`），管理 LLM/Embedding/RAG/压缩设置
-- `graph/agent.py` — AgentManager 单例，ChatOpenAI + LangGraph 流式调用
-- `graph/prompt_builder.py` — 6 层系统提示拼接（SOUL→IDENTITY→USER→AGENTS→MEMORY→skills）
-- `graph/session_manager.py` — 会话持久化（`sessions/` 目录 JSON）
-- `graph/memory_indexer.py` — LlamaIndex RAG 向量索引
-- `api/` — REST 路由：chat(SSE)、sessions、files、compress、config、tokens、eval、skills
-- `tools/` — Agent 工具：terminal、python_repl、fetch_url、read_file、write_file、search_knowledge、mem0、skills_scanner、create_skill_version
-- `workspace/` — 人设 Markdown：SOUL.md、IDENTITY.md、USER.md、AGENTS.md
-- `skills/` — 技能库，每个子目录含 `SKILL.md`（frontmatter: name + description），启动时自动扫描
+**后端** (`backend/`): 分层架构
+- `graph/` — Agent 核心（提示构建、会话管理、状态管理、中间件链）
+- `tools/` — Agent 工具集（终端、文件操作、搜索、任务管理等，支持条件注册）
+- `skills/` — 技能库（SKILL.md 驱动，自动发现）
+- `workspace/` — 人设 Markdown
+- `api/` — REST 路由
 
 **前端** (`frontend/`):
-- `src/app/` — Next.js App Router
-- `src/components/chat/` — 聊天 UI（消息气泡、工具调用可视化、输入）
-- `src/components/editor/` — Monaco Editor 配置编辑
-- `src/components/layout/` — 布局（侧栏、设置面板）
+- `src/components/` — UI 组件（chat、editor、layout）
 - `src/lib/` — 状态管理 + API 客户端
 
 ## 关键设计模式
 
 - **Markdown-as-config**: 人设/技能/记忆均为可读 Markdown 文件
-- **6 层系统提示**: `prompt_builder.py` 动态拼接 workspace 文件 + 技能快照
-- **双记忆模式**: MEMORY.md 文件注入 vs RAG 向量检索（LlamaIndex），通过配置切换
-- **SSE 事件流**: 流式返回 token/tool_start/tool_end/rag_hit 等事件
-- **技能自动发现**: 放置 `SKILL.md` 到 `skills/<name>/`，重启即生效
-- **LLM 灵活切换**: ChatOpenAI 适配器，支持 DashScope/DeepSeek/OpenAI
+- **多层系统提示动态拼接** + **SSE 事件流式传输**
+- **Checkpoint 持久化** + **中间件链**（工具输出截断、自动摘要、运行时过滤、限流）
+- **双记忆模式**（文件注入 vs RAG 向量检索）+ 可选长期记忆服务
+- **技能自动发现**（SKILL.md 即注册）+ **LLM 适配器多后端切换**
 
 ## OpenSpec 工作流
 
@@ -69,12 +60,25 @@ BACKEND_PORT=9000 FRONTEND_PORT=4000 ./scripts/start-macos-linux.sh
 2. **不猜测需求**: spec 中未明确定义的行为，问用户，不自行补充。
 3. **out-of-scope 是红线**: proposal.md 标注为 out-of-scope 的功能，严禁实现。
 
-### Apply 阶段规则
+### 分阶段交互
 
-1. 每完成一个 tasks.md 中的 Phase，停下来。
-2. 总结当前阶段变更（改了什么文件、为什么这么改）。
-3. 等待用户 review 确认后，再继续下一 Phase。
-4. 严禁一次性实现所有任务。
+`/opsx:apply` 执行时严格按 Phase 推进，防止错上加错：
+1. 每完成一个 Phase 停下来
+2. 总结当前阶段变更（改了哪些文件、新增了什么）
+3. 等待用户 review 确认后再继续下一 Phase
+4. 发现偏差立即停止并说明问题
+
+### 复用优先
+
+- 优先使用已有组件和服务，不做推倒重来
+- 新建文件前先搜索是否有可复用的模块
+- 不创建重复的 utility 函数
+
+### 命名一致性
+
+- Change 用 domain-based naming（如 `user-auth`、`ai-chat`），不用 feature-level（如 `add-sidebar`、`fix-layout`）
+- Spec 按 capability 平铺命名（如 `task-state`、`middleware-chain`、`checkpoint-projection`），同一 capability 的前后端改动放同一个 spec
+- 组件 PascalCase、API 端点 kebab-case、数据库表 snake_case
 
 ### 代码标准
 
@@ -82,7 +86,6 @@ BACKEND_PORT=9000 FRONTEND_PORT=4000 ./scripts/start-macos-linux.sh
 - 样式全部使用 Tailwind CSS，禁止内联 style
 - 支持暗色模式（`dark:` 前缀）
 - 所有图片使用 lazy loading
-- 组件文件名使用 PascalCase
 
 ## graphify
 

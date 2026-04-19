@@ -1,6 +1,6 @@
 ## Purpose
 
-定义基于上下文窗口比例的工具输出压缩策略，包括安全水位和紧张水位的阈值设定、当前轮次工具输出保护、多级渐进式压缩策略、工具输出自动归档等功能。
+定义基于上下文窗口比例的工具输出压缩策略，包括安全水位和紧张水位的阈值设定、当前轮次工具输出保护、多级渐进式压缩策略、工具输出自动归档等功能。此中间件为四层中间件链的第一层（ToolOutputBudgetMiddleware）。
 
 ## Requirements
 
@@ -39,6 +39,8 @@
 - safe_ratio ≤ 上下文 < pressure_ratio：N = 最近 3 组
 - 上下文 ≥ pressure_ratio：N = 最近 1 组
 
+保护逻辑通过 `_get_protected_tool_ids()` 方法实现，从消息末尾向前扫描 AIMessage(tool_calls) 分组。
+
 #### Scenario: 多步工具调用链中早期输出被保护
 
 - **WHEN** Agent 连续执行 3 次工具调用（terminal → read_file → terminal），上下文使用比例为 30%
@@ -73,9 +75,11 @@
 
 ### Requirement: 工具输出自动归档
 
-当单条工具输出超过上下文窗口的 5%（`archive_ratio`）时，系统 SHALL 将完整输出归档到文件，ToolMessage 中仅保留截断摘要和文件路径引用。
+当单条工具输出超过上下文窗口的 5%（`ARCHIVE_RATIO = 0.05`）时，系统 SHALL 将完整输出归档到文件，ToolMessage 中仅保留截断摘要和文件路径引用。
 
 归档文件 MUST 保存到 `sessions/archive/` 目录，文件名格式为 `tool_{tool_name}_{timestamp}.txt`。Agent 可通过 `read_file` 工具重新加载归档文件。
+
+归档操作在截断之前检查（先归档再截断）。
 
 #### Scenario: 超大输出自动归档
 
@@ -87,9 +91,14 @@
 - **WHEN** Agent 需要查看已归档的完整输出
 - **THEN** Agent MUST 能通过 `read_file("sessions/archive/tool_terminal_1713000000.txt")` 读取完整内容
 
+#### Scenario: 归档目录不可写时应降级为截断
+
+- **WHEN** `sessions/archive/` 目录不存在或文件系统不可写
+- **THEN** 系统 SHOULD 仅执行截断压缩，不归档完整输出。当前实现中归档写入异常会向上冒泡，待补充 try/except 保护后可安全降级
+
 ### Requirement: 上下文窗口大小配置
 
-系统 SHALL 在 `config.json` 的 `llm` 段中支持 `context_window` 字段（整数，单位 token）。前端 MUST 提供模型到上下文窗口的映射表，用户选择模型时自动填入。
+系统 SHALL 在 `config.json` 的 `llm` 段中支持 `context_window` 字段（整数，单位 token）。前端 MUST 提供模型到上下文窗口的映射表（`CONTEXT_WINDOWS`），用户选择模型时自动填入，自定义模型可手动输入。
 
 #### Scenario: 用户选择 qwen3.5-plus 模型
 
@@ -103,7 +112,7 @@
 
 ### Requirement: SummarizationMiddleware 触发阈值联动
 
-`SummarizationMiddleware` 的 trigger_tokens MUST 基于上下文窗口比例计算，而非写死为固定值。默认比例为窗口的 60%。
+`SummarizationMiddleware` 的 trigger_tokens MUST 基于上下文窗口比例计算，比例固定为 0.6（`int(context_window * 0.6)`）。
 
 #### Scenario: 128K 模型的摘要触发点
 

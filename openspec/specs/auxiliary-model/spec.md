@@ -6,9 +6,9 @@
 
 ### Requirement: 统一辅助模型配置结构
 
-系统 SHALL 在 `config.json` 中提供 `auxiliary_model` 配置段，包含 `model`（模型名称）和 `temperature`（生成温度）两个字段。辅助模型 MUST 复用主模型的 `api_key` 和 `base_url`，不提供独立认证配置。
+系统 SHALL 在 `config.json` 中提供 `auxiliary_model` 配置段，包含 `model`（模型名称）和 `temperature`（生成温度）两个字段。辅助模型 MUST 复用主模型的 `api_key` 和 `base_url`。
 
-默认值 MUST 为 `{"model": "qwen3.5-flash", "temperature": 0}`。
+默认值 MUST 为 `{"model": "qwen3.5-flash", "temperature": 0}`。注意：`_DEFAULT_CONFIG` 中未包含 `auxiliary_model` 字段，默认值硬编码在 `get_auxiliary_model_config()` 函数末尾和 `get_settings_for_display()` 中。
 
 #### Scenario: 使用默认辅助模型配置
 
@@ -41,7 +41,9 @@
 
 ### Requirement: 集中式辅助 LLM 工厂函数
 
-系统 SHALL 在 `config.py` 中提供 `create_auxiliary_llm()` 函数，返回 `ChatOpenAI` 实例或 `None`。所有辅助任务 MUST 通过此函数创建 LLM 实例。
+系统 SHALL 在 `config.py` 中提供 `create_auxiliary_llm()` 函数，返回 `ChatOpenAI` 实例或 `None`。大多数辅助任务 MUST 通过此函数创建 LLM 实例。
+
+例外：`Mem0Manager` 使用 `get_auxiliary_model_config()` 获取模型名称后自行构建 mem0 专用 LLM 配置（temperature 固定为 0.1），因 mem0 库需要自己的 LLM 初始化方式。
 
 #### Scenario: 正常创建辅助 LLM
 
@@ -53,23 +55,31 @@
 - **WHEN** 主模型未配置 `api_key` 且环境变量 `DASHSCOPE_API_KEY` 也未设置
 - **THEN** 函数 SHALL 返回 `None`，调用方 MUST 跳过辅助操作
 
-### Requirement: 所有辅助任务统一使用辅助模型
+#### Scenario: 辅助模型配置无效时安全降级
+
+- **WHEN** `auxiliary_model.model` 配置为空字符串
+- **THEN** `create_auxiliary_llm()` SHALL 返回 `None`，MUST NOT 尝试创建无效的 LLM 实例
+
+### Requirement: 所有辅助任务使用辅助模型
 
 以下辅助任务 MUST 通过 `create_auxiliary_llm()` 获取 LLM 实例：
 
-1. `SummarizationMiddleware`（`agent.py`）
-2. 任务目标摘要 `_summarize_goal()`（`agent.py`）
-3. mem0 事实提取（`mem0_manager.py`）
-4. 会话标题生成 `_generate_title()`（`chat.py`）
-5. 会话摘要生成（`sessions.py`）
-6. 历史压缩摘要（`compress.py`）
+1. `SummarizationMiddleware`（`agent.py`）— 通过 `_create_summary_llm()` 委托
+2. 任务目标摘要 `_summarize_goal()`（`agent.py`）— 通过 `_create_summary_llm()` 委托
+3. 会话标题生成 `_generate_title()`（`chat.py`）
+4. 会话摘要生成（`sessions.py` — generate_title 端点）
+5. 历史压缩摘要（`compress.py` — `_generate_summary()`）
+6. Checkpoint 手动摘要（`agent.py` — `_generate_checkpoint_summary()`）
+
+以下任务使用 `get_auxiliary_model_config()` 获取模型名称后自行构建：
+7. mem0 事实提取（`mem0_manager.py`）— temperature 固定 0.1
 
 #### Scenario: 会话标题生成使用辅助模型
 
 - **WHEN** 新会话的第一条消息触发标题生成
 - **THEN** 系统 SHALL 使用辅助模型（而非主模型）生成标题
 
-#### Scenario: mem0 事实提取使用辅助模型
+#### Scenario: mem0 事实提取使用辅助模型名称
 
 - **WHEN** mem0 执行对话事实提取
 - **THEN** 系统 SHALL 使用辅助模型的 model 配置创建 mem0 LLM 实例，temperature 固定为 0.1
@@ -77,7 +87,7 @@
 #### Scenario: 摘要中间件使用辅助模型
 
 - **WHEN** `SummarizationMiddleware` 需要创建摘要 LLM
-- **THEN** 系统 SHALL 通过 `create_auxiliary_llm()` 获取实例，替代当前的 `_create_summary_llm()`
+- **THEN** 系统 SHALL 通过 `_create_summary_llm()` → `create_auxiliary_llm()` 获取实例
 
 ### Requirement: 前端设置页面辅助模型配置
 
@@ -94,3 +104,8 @@
 
 - **WHEN** 用户修改辅助模型配置
 - **THEN** 主对话模型的配置 MUST 不受影响，反之亦然
+
+#### Scenario: 辅助模型不可用时返回 HTTP 503
+
+- **WHEN** `create_auxiliary_llm()` 返回 None（无 API key）
+- **THEN** 依赖辅助模型的操作（如手动摘要）MUST 返回 HTTP 503 错误

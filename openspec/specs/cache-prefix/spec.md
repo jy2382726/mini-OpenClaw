@@ -1,54 +1,84 @@
 ## Purpose
 
-修改自动对话摘要中间件的实现，使用 LangChain 内置的 SummarizationMiddleware 替代自定义实现，确保在 checkpoint_only 模式下摘要状态能正确持久化。
+定义三段式系统提示缓存前缀架构，将系统提示分为极稳定层、低频变化层和高频变化层，实现动态内容与静态前缀的分离，最大化 KV-cache 命中率。
 
 ## Requirements
 
-### Requirement: 自动对话摘要中间件
+### Requirement: 三段式系统提示缓存前缀
 
-系统 SHALL 使用 LangChain 内置的 `SummarizationMiddleware`，配置为 `trigger=("tokens", trigger_tokens)` + `keep=("messages", 10)`，其中 `trigger_tokens = int(context_window * 0.6)`。在 token 数超过阈值时自动生成结构化摘要替换旧消息。
+系统 MUST 将系统提示分为三个 Cache Zone：
 
-摘要 MUST 包含四段结构：SESSION INTENT（会话意图）、SUMMARY（关键上下文和决策）、ARTIFACTS（文件变更记录）、NEXT STEPS（待办任务）。
+- Cache Zone 1（极稳定层）：SOUL.md + IDENTITY.md + USER.md，几乎不变的内容
+- Cache Zone 2（低频变化层）：AGENTS.md + 精简技能摘要（由 SkillRegistry.build_compact_snapshot 生成）
+- Cache Zone 3（高频变化层）：动态记忆注入 + 任务状态
 
-摘要 MUST 使用辅助 LLM 生成（通过 `create_auxiliary_llm()` 工厂函数创建），temperature 为 0。
+Zone 之间通过 `<!-- Zone N: xxx -->` HTML 注释标记分隔，便于调试和缓存边界识别。
 
-当 `checkpoint_agent_input` 为 true 时，SummarizationMiddleware 操作的消息列表来自 checkpoint 恢复而非 session_manager 传入。中间件执行摘要后，修改结果 MUST 通过 checkpoint 自动持久化，下一轮对话时 Agent 看到的是摘要后的消息列表。
+`build_stable_prefix()` 函数生成 Zone 1 + Zone 2 的稳定前缀。
+`build_dynamic_prefix()` 函数生成 Zone 3 的动态内容。
 
-手动摘要（`POST /api/sessions/{id}/summarize`）MUST 复用 `SummarizationMiddleware.DEFAULT_SUMMARY_PROMPT` 生成摘要，确保自动和手动摘要的输出格式一致。手动摘要的消息替换逻辑（保留最近 10 条、AI/Tool 配对保护）MUST 与 `SummarizationMiddleware` 的策略对齐。
+#### Scenario: Zone 1 和 Zone 2 内容稳定
 
-当 `compressed_context` 注入逻辑（session_manager 的 `load_session_for_agent` 中的 COMPRESSED_CONTEXT_PREFIX 注入）废弃后，历史压缩 MUST 完全由 SummarizationMiddleware 和手动摘要 API 接管，不再依赖 JSON 文件中的 `compressed_context` 字段。
+- **WHEN** 连续两次请求之间 workspace 文件和技能列表未变化
+- **THEN** Zone 1 + Zone 2 的系统提示前缀 MUST 完全一致，便于 KV-cache 命中
 
-#### Scenario: Token 超阈值自动触发摘要
+#### Scenario: Zone 3 每次请求可能变化
 
-- **WHEN** 当前消息列表的 token 总数超过 `context_window * 0.6`
-- **THEN** 系统自动生成四段结构化摘要，替换超出 `keep` 范围的旧消息
+- **WHEN** 用户发送新消息触发请求
+- **THEN** Zone 3 的动态记忆注入和任务状态 MUST 根据当前查询实时更新
 
-#### Scenario: 最近 10 条消息始终保留
+### Requirement: 动态内容与静态前缀分离
 
-- **WHEN** 摘要触发后
-- **THEN** 最新的 10 条消息 MUST 完整保留，不被摘要替换
+系统 MUST 将 MEMORY.md 全文注入和 RAG 检索结果从系统提示中移除，改为通过 `UnifiedMemoryRetriever` 检索后作为 SystemMessage 注入在用户消息之前。
 
-#### Scenario: AI/Tool 消息配对保护
+`build_system_prompt()` 中的 `rag_mode` 参数保留但无实际作用，所有模式均通过统一记忆检索接口处理。
 
-- **WHEN** 摘要的截断点落在一条 AIMessage（含 tool_calls）和对应的 ToolMessage 之间
-- **THEN** 系统 MUST 将截断点移动到安全位置，确保 tool_calls 和 tool_result 的配对完整性
+#### Scenario: MEMORY.md 不再注入到系统提示
 
-#### Scenario: Token 未超阈值不触发
+- **WHEN** 非 RAG 模式下构建系统提示
+- **THEN** 系统 MUST NOT 将 MEMORY.md 全文拼入系统提示，而是通过统一记忆检索按需注入
 
-- **WHEN** 当前消息列表的 token 总数未超过 `context_window * 0.6`
-- **THEN** 消息列表保持不变，不执行摘要操作
+#### Scenario: 检索结果注入为 SystemMessage
 
-#### Scenario: checkpoint_only 模式下摘要状态持久化
+- **WHEN** 检索到相关记忆条目
+- **THEN** 检索结果 MUST 作为 SystemMessage 注入在用户消息之前（通过 `messages.insert(len(messages) - 1, SystemMessage(...))`），MUST NOT 作为 AssistantMessage 注入到历史末尾
 
-- **WHEN** `checkpoint_agent_input` 为 true，SummarizationMiddleware 触发摘要并修改了消息列表
-- **THEN** 修改后的消息列表 MUST 通过 checkpoint 自动持久化，下一轮对话时 Agent 看到的消息 MUST 包含摘要结果
+### Requirement: 系统提示构建确定性
 
-#### Scenario: 手动摘要与自动摘要 Prompt 一致
+系统 MUST 确保相同输入下系统提示的序列化结果完全一致（字符级别），以最大化缓存命中率。
 
-- **WHEN** 用户通过前端按钮触发手动摘要
-- **THEN** 摘要 MUST 使用 `DEFAULT_SUMMARY_PROMPT` 生成，输出格式与自动摘要完全一致
+构建使用模板化拼接（`_TEMPLATE.format(...)` 带 `{soul}`/`{identity}` 等占位符），非字符串拼接。
 
-#### Scenario: compressed_context 废弃后摘要完整接管
+每个组件读取通过 `_read_component(path, label)` 函数实现，包含以下安全措施：
+- 文件不存在时返回空字符串，不阻塞构建
+- 组件长度超过 `MAX_COMPONENT_LENGTH`（20000 字符）时截断
+- 多编码回退策略（UTF-8 → GBK → latin-1）
 
-- **WHEN** `compressed_context` 注入逻辑被移除，且 `checkpoint_agent_input` 为 true
-- **THEN** 历史压缩 MUST 完全由 SummarizationMiddleware 和手动摘要 API 管理，不再有其他压缩来源
+#### Scenario: 相同输入产生相同输出
+
+- **WHEN** 两次调用 `build_system_prompt()` 时 workspace 文件和技能列表完全相同
+- **THEN** 两次调用返回的字符串 MUST 逐字符一致
+
+#### Scenario: workspace 文件缺失时跳过对应 Zone
+
+- **WHEN** Zone 1 或 Zone 2 对应的 workspace 文件不存在或读取失败
+- **THEN** 系统 SHALL 跳过该 Zone 的内容，使用空字符串替代，不阻塞系统提示构建
+
+#### Scenario: 组件长度超限截断
+
+- **WHEN** 某个 workspace 文件内容超过 20000 字符
+- **THEN** 系统 SHALL 截断该组件内容至 20000 字符，MUST 在截断处添加省略标注
+
+### Requirement: 任务状态更新指引
+
+当系统存在活跃的 TaskState（`has_active_steps=True`）时，Zone 3 动态前缀 MUST 包含 `_TASK_UPDATE_GUIDANCE` 常量内容，引导 Agent 正确使用 `update_task` 工具更新任务状态。
+
+#### Scenario: 有活跃任务时注入指引
+
+- **WHEN** 当前会话有活跃 TaskState，`has_active_steps` 为 true
+- **THEN** Zone 3 MUST 包含任务更新工具使用指引
+
+#### Scenario: 无活跃任务时不注入指引
+
+- **WHEN** 当前会话无活跃 TaskState
+- **THEN** Zone 3 MUST NOT 包含任务更新工具使用指引

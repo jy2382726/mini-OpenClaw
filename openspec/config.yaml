@@ -9,43 +9,51 @@ context: |
   - 前端: Next.js 14 + TypeScript + React
   - RAG: LlamaIndex + DashScope/OpenAI Embeddings
   - 通信: SSE 流式传输
+  - 持久化: AsyncSqliteSaver checkpoint + SQLite 元数据
 
   项目结构:
-  - backend/ — FastAPI 后端 (app.py 入口)
-  - backend/graph/ — Agent 核心 (agent.py, prompt_builder.py, session_manager.py)
-  - backend/tools/ — 工具集 (terminal, python_repl, fetch_url, read_file, write_file, search_knowledge, mem0, skills_scanner, create_skill_version)
-  - backend/skills/ — 技能库 (6 个技能: dialogue-summarizer, get_date, get_weather, skill-benchmark, skill-creator, skill-creator-pro)
-  - backend/workspace/ — Agent 人设 Markdown (SOUL.md, IDENTITY.md, USER.md, AGENTS.md)
-  - backend/api/ — REST 路由 (chat, sessions, files, compress, config, tokens, eval, skills)
+  - backend/ — FastAPI 后端，分层架构：graph/（Agent 核心）、tools/（工具集）、skills/（技能库，自动发现）、workspace/（人设 Markdown）、api/（REST 路由）
   - frontend/ — Next.js 前端
+  - openspec/ — 规范驱动开发
 
   关键设计模式:
-  - Markdown-as-config: 人设/技能/记忆均为可读的 Markdown 文件
-  - 6 层系统提示: 动态拼接 workspace 文件 + 技能快照
-  - 双记忆模式: MEMORY.md 文件注入 vs RAG 向量检索（LlamaIndex）
-  - SSE 事件流: 流式返回 token/tool_start/tool_end/rag_hit 等事件
-  - 技能自动发现: 放置 SKILL.md 到 skills/<name>/ 即可自动注册
-  - LLM 灵活切换: 通过 ChatOpenAI 适配器支持 DashScope/DeepSeek/OpenAI
+  - Markdown-as-config: 人设/技能/记忆均为可读 Markdown 文件
+  - 三段式系统提示缓存前缀（Zone 1/2/3）+ SSE 事件流式传输
+  - Checkpoint 持久化（已完全切换，无 JSON 回退）+ 四层中间件链（截断→摘要→工具过滤→限流）
+  - 统一记忆检索（UnifiedMemoryRetriever 整合 mem0 + RAG + MEMORY.md）+ 可选长期记忆服务
+  - 技能自动发现（SKILL.md 即注册）+ 启发式属性推断 + LLM 适配器多后端切换
+  - 任务状态嵌入 Agent state_schema，支持多步任务追踪、SSE 实时推送和流结束自动完成
 
-  语言要求: 全程使用中文（回复、注释、文档、commit message），标识符保持英文。
+  强约束:
+  - 尽可能复用已有组件和服务，不做推倒重来。新建模块前必须确认无已有模块可复用。
+  - 语言要求: 全程使用中文（回复、注释、文档、commit message），标识符保持英文。
 
-# 按 artifact 类型定制的规则
+# 按 artifact 类型定制的规则（含过度规范化防御）
 rules:
   proposal:
     - 必须使用中文撰写
     - Impact 部分必须标注受影响的具体文件路径
     - 新增 Capabilities 使用 kebab-case 命名
+    - 必须显式列出不做的事项（out-of-scope / NOT doing 清单）
+    - 高风险变更必须包含回滚方案
   specs:
     - 必须使用中文撰写
     - 每个 Requirement 必须包含至少一个 Scenario
     - Scenario 必须使用 #### 四级标题（不能用三级或列表）
-    - 使用 SHALL/MUST 表达规范性需求，避免 should/may
+    - 使用 RFC 2119 关键词（SHALL/SHOULD/MAY）表达规范性需求
     - 修改已有 Requirement 时必须包含完整内容，不能只写变更部分
+    - 所有 API 行为使用 Given/When/Then 格式
+    - 每个 spec 必须包含至少一个错误场景
+    - 每个 requirement 的 scenario 不超过 5 个
+    - 单个 spec 文件不超过 2000 词
+    - 省略理由说明，除非直接影响实现
   design:
     - 必须使用中文撰写
     - Decisions 部分必须说明为什么选 X 而不是 Y
     - 涉及多个模块时必须包含数据流图或调用关系
     - 如果有迁移风险，必须包含回滚策略
+    - 包含组件层级图
+    - 文档化所有 API 端点规范
   tasks:
     - 必须使用中文撰写
     - 每个任务不超过 2 小时工作量
@@ -53,3 +61,6 @@ rules:
     - 按依赖关系排序，先完成前置任务
     - 后端任务必须注明涉及的具体 Python 模块路径
     - 前端任务必须注明涉及的具体 React 组件路径
+    - 相关 task 按 phase 分组
+    - 每个 phase 结束后包含验证步骤
+    - 新建服务前必须先检查是否有可复用的已有服务
