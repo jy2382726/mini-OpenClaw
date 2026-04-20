@@ -9,7 +9,7 @@ import TaskProgressPanel from "./TaskProgressPanel";
 
 export default function ChatInput() {
   const [text, setText] = useState("");
-  const { sendMessage, stopStreaming, isStreaming, isCompressing, compressCurrentSession, clearCurrentSession, messages, currentTaskState } = useApp();
+  const { sendMessage, stopStreaming, isStreaming, isCompressing, compressCurrentSession, clearCurrentSession, messages, currentTaskState, contextUsage } = useApp();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const disabled = isStreaming || isCompressing;
 
@@ -153,11 +153,19 @@ export default function ChatInput() {
           <button
             onClick={handleCompress}
             disabled={disabled || messages.length < 4}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-gray-600 bg-white/60 border border-black/[0.06] hover:bg-white hover:shadow-sm hover:text-[#002fa7] transition-all disabled:opacity-25 disabled:cursor-not-allowed"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-white/60 border border-black/[0.06] hover:bg-white hover:shadow-sm transition-all disabled:opacity-25 disabled:cursor-not-allowed ${
+              contextUsage && contextUsage.ratio >= 0.8
+                ? "text-red-500 hover:text-red-600"
+                : contextUsage && contextUsage.ratio >= 0.6
+                  ? "text-orange-500 hover:text-orange-600"
+                  : "text-gray-600 hover:text-[#002fa7]"
+            }`}
             title={messages.length < 4 ? "至少需要 4 条消息才能摘要" : "摘要早期消息，保留最近 10 条"}
           >
             <Archive className="w-3.5 h-3.5" />
-            压缩
+            {contextUsage && contextUsage.ratio >= 0.6
+              ? `压缩 (${Math.round(contextUsage.ratio * 100)}%)`
+              : "压缩"}
           </button>
           <button
             onClick={handleClear}
@@ -233,13 +241,19 @@ export default function ChatInput() {
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={!text.trim() || isCompressing}
+            disabled={!text.trim() || isCompressing || (contextUsage !== null && contextUsage.ratio > 0.8)}
             className="shrink-0 w-8 h-8 flex items-center justify-center rounded-xl bg-[#002fa7] text-white disabled:opacity-25 hover:bg-[#001f7a] transition-all active:scale-95"
+            title={contextUsage && contextUsage.ratio > 0.8 ? "上下文空间不足，请先压缩对话" : undefined}
           >
             <ArrowUp className="w-4 h-4" />
           </button>
         )}
       </div>
+      {contextUsage && contextUsage.ratio > 0.8 && (
+        <p className="text-center text-[11px] text-red-500 mt-1.5">
+          上下文空间不足，请先压缩对话
+        </p>
+      )}
       <p className="text-center text-[10px] text-gray-400/70 mt-2">
         Powered by DeepSeek · mini OpenClaw v0.1
       </p>

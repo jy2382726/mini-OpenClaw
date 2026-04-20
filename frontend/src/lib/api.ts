@@ -286,7 +286,7 @@ export async function generateTitle(
  */
 export async function getSessionTokenCount(
   sessionId: string
-): Promise<{ system_tokens: number; message_tokens: number; total_tokens: number }> {
+): Promise<{ system_tokens: number; message_tokens: number; total_tokens: number; context_window: number; usage_ratio: number }> {
   const resp = await fetch(
     `${API_BASE}/tokens/session/${encodeURIComponent(sessionId)}`
   );

@@ -38,10 +38,16 @@ async def get_session_token_count(session_id: str) -> dict[str, Any]:
     for msg in messages:
         message_tokens += _count_tokens(msg.get("content", ""))
 
+    from config import get_context_window
+    context_window = get_context_window()
+    total_tokens = system_tokens + message_tokens
+
     return {
         "system_tokens": system_tokens,
         "message_tokens": message_tokens,
-        "total_tokens": system_tokens + message_tokens,
+        "total_tokens": total_tokens,
+        "context_window": context_window,
+        "usage_ratio": round(total_tokens / context_window, 2) if context_window > 0 else 0.0,
     }
 
 

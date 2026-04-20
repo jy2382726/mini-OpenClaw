@@ -22,6 +22,7 @@ import {
   setRagMode as apiSetRagMode,
   loadSkill as apiLoadSkill,
   fetchTaskState as apiFetchTaskState,
+  getSessionTokenCount,
 } from "./api";
 
 // ── Types ──────────────────────────────────────────────────
@@ -130,6 +131,9 @@ interface AppState {
   expandedFile: boolean;
   setExpandedFile: (v: boolean) => void;
 
+  // Context usage
+  contextUsage: { ratio: number; totalTokens: number; contextWindow: number } | null;
+
   // Panel widths
   sidebarWidth: number;
   setSidebarWidth: (w: number | ((prev: number) => number)) => void;
@@ -169,6 +173,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [rightTab, setRightTab] = useState<"memory" | "skills">("memory");
   const [rawMessages, setRawMessages] = useState<RawMessage[] | null>(null);
   const [expandedFile, setExpandedFile] = useState(false);
+  const [contextUsage, setContextUsage] = useState<{ ratio: number; totalTokens: number; contextWindow: number } | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [isCompressing, setIsCompressing] = useState(false);
@@ -207,6 +212,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     loadSessions();
   }, [loadSessions]);
+
+  // Context usage: fetch after streaming ends or session/message changes
+  useEffect(() => {
+    if (isStreaming || messages.length === 0) {
+      if (messages.length === 0) setContextUsage(null);
+      return;
+    }
+    getSessionTokenCount(sessionId)
+      .then((data) =>
+        setContextUsage({
+          ratio: data.usage_ratio,
+          totalTokens: data.total_tokens,
+          contextWindow: data.context_window,
+        })
+      )
+      .catch(() => setContextUsage(null));
+  }, [sessionId, messages.length, isStreaming]);
 
   const setSessionId = useCallback(
     (id: string) => {
@@ -806,6 +828,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         loadRawMessages,
         expandedFile,
         setExpandedFile,
+        contextUsage,
         sidebarWidth,
         setSidebarWidth,
         inspectorWidth,
