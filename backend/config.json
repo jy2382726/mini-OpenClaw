@@ -36,12 +36,18 @@
         "python_repl": 1500,
         "fetch_url": 3000,
         "read_file": 2000,
-        "search_knowledge": 1000
+        "search_knowledge": 1000,
+        "glob_search": 1500,
+        "grep_search": 2500
       }
     },
     "summarization": {
       "enabled": true,
-      "trigger_tokens": 8000,
+      "trigger_ratio": 0.6,
+      "trim_ratio": 0.30,
+      "trigger_tokens": null,
+      "trim_tokens": null,
+      "summary_prompt_file": null,
       "keep_messages": 10
     },
     "tool_filter": {

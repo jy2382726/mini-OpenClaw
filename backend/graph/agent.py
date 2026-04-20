@@ -141,14 +141,21 @@ class AgentManager:
         return agent
 
     def _build_middleware(self) -> list:
-        """构建四层中间件链：截断 → 摘要 → 工具过滤 → 限流。
+        """构建中间件链：截断 → 摘要 → 工具过滤 → 限流 → 文件搜索。
 
         每层通过 config.json 的 middleware 配置段独立开关。
         所有阈值基于 context_window 比例计算，切换模型后自动适应。
         """
         from config import get_middleware_config, get_context_window
-        from graph.middleware import ToolOutputBudgetMiddleware, ContextAwareToolFilter
-        from langchain.agents.middleware import SummarizationMiddleware, ToolCallLimitMiddleware
+        from graph.middleware import (
+            ToolOutputBudgetMiddleware,
+            ContextAwareToolFilter,
+            ContextAwareSummarizationMiddleware,
+        )
+        from langchain.agents.middleware import (
+            ToolCallLimitMiddleware,
+            FilesystemFileSearchMiddleware,
+        )
 
         mw_cfg = get_middleware_config()
         context_window = get_context_window()
@@ -166,18 +173,30 @@ class AgentManager:
                 base_dir=self._base_dir / "sessions" if self._base_dir else None,
             ))
 
-        # 第 2 层：自动摘要（使用轻量模型）
+        # 第 2 层：自动摘要（使用轻量模型 + SystemMessage 保护）
         if mw_cfg.get("summarization", {}).get("enabled", True):
             summary_llm = self._create_summary_llm()
             if summary_llm:
                 sum_cfg = mw_cfg.get("summarization", {})
-                # trigger_tokens 联动上下文窗口比例（默认 60%）
-                trigger_tokens = int(context_window * 0.6)
+                # trigger: 比例优先，绝对值覆盖
+                trigger_ratio = sum_cfg.get("trigger_ratio", 0.6)
+                trigger_tokens = sum_cfg.get("trigger_tokens")
+                if trigger_tokens is None:
+                    trigger_tokens = int(context_window * trigger_ratio)
+                # trim: 比例优先，绝对值覆盖
+                trim_ratio = sum_cfg.get("trim_ratio", 0.30)
+                trim_tokens = sum_cfg.get("trim_tokens")
+                if trim_tokens is None:
+                    trim_tokens = int(context_window * trim_ratio)
+                # 摘要提示词：配置文件 > workspace 默认 > 内置常量
+                summary_prompt = self._load_summary_prompt(sum_cfg)
                 middleware.append(
-                    SummarizationMiddleware(
+                    ContextAwareSummarizationMiddleware(
                         model=summary_llm,
                         trigger=("tokens", trigger_tokens),
                         keep=("messages", sum_cfg.get("keep_messages", 10)),
+                        trim_tokens_to_summarize=trim_tokens,
+                        summary_prompt=summary_prompt,
                     )
                 )
 
@@ -199,6 +218,14 @@ class AgentManager:
                 ]
             middleware.extend(limit_items)
 
+        # 第 5 层：长期记忆管理（MemoryMiddleware，规划中）
+        # 第 6 层：文件搜索工具（glob_search + grep_search）
+        middleware.append(FilesystemFileSearchMiddleware(
+            root_path=str(self._base_dir),
+            use_ripgrep=True,
+            max_file_size_mb=10,
+        ))
+
         return middleware
 
     def _create_summary_llm(self):
@@ -207,6 +234,25 @@ class AgentManager:
         委托给统一的 create_auxiliary_llm() 工厂函数。
         """
         return create_auxiliary_llm()
+
+    def _load_summary_prompt(self, sum_cfg: dict) -> str:
+        """加载摘要提示词，三级优先级：配置文件 > workspace/summary_prompt.md > 内置常量。"""
+        from graph.middleware import DEFAULT_SUMMARY_PROMPT_ZH
+
+        # 优先级 1: 配置指定路径
+        prompt_file = sum_cfg.get("summary_prompt_file")
+        if prompt_file:
+            path = self._base_dir / prompt_file
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+
+        # 优先级 2: 默认 workspace 文件
+        default_path = self._base_dir / "workspace" / "summary_prompt.md"
+        if default_path.exists():
+            return default_path.read_text(encoding="utf-8")
+
+        # 优先级 3: 内置常量
+        return DEFAULT_SUMMARY_PROMPT_ZH
 
     def _get_summarize_lock(self, session_id: str) -> asyncio.Lock:
         """获取指定会话的摘要并发锁（按 session_id 粒度）。"""
@@ -316,12 +362,15 @@ class AgentManager:
         return split_idx
 
     async def _generate_checkpoint_summary(self, llm, messages: list) -> str:
-        """使用辅助 LLM 和 DEFAULT_SUMMARY_PROMPT 生成结构化摘要。"""
-        from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
+        """使用辅助 LLM 和自定义中文提示词生成结构化摘要。"""
+        from config import get_middleware_config
         from langchain_core.messages import get_buffer_string
 
+        sum_cfg = get_middleware_config().get("summarization", {})
+        summary_prompt = self._load_summary_prompt(sum_cfg)
+
         formatted = get_buffer_string(messages)
-        prompt = DEFAULT_SUMMARY_PROMPT.format(messages=formatted).rstrip()
+        prompt = summary_prompt.format(messages=formatted).rstrip()
 
         result = await llm.ainvoke([HumanMessage(content=prompt)])
         return result.content.strip() if hasattr(result, "content") else str(result).strip()

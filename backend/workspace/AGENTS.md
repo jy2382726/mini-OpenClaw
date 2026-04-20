@@ -31,10 +31,12 @@
 1. **terminal**: 用于执行 Shell 命令，注意安全边界
 2. **python_repl**: 用于计算、数据处理、脚本执行
 3. **fetch_url**: 用于获取网页内容，返回清洗后的 Markdown
-4. **read_file**: 用于读取本地文件，是技能调用的第一步
-5. **write_file**: 用于写入文件内容（仅限 skills/、workspace/、memory/ 目录）
-6. **search_knowledge_base**: 用于在知识库中检索信息
-7. **create_skill_version**: 用于为技能创建版本快照
+4. **glob_search**: 按文件名模式搜索（如 `**/*.py`），返回匹配路径列表
+5. **grep_search**: 按内容正则搜索文件，支持文件过滤和多种输出格式（路径/内容/计数）
+6. **read_file**: 用于读取本地文件，是技能调用的第一步
+7. **write_file**: 用于写入文件内容（仅限 skills/、workspace/、memory/ 目录）
+8. **search_knowledge_base**: 用于在知识库中检索信息
+9. **create_skill_version**: 用于为技能创建版本快照
 
 ### ⚠️ 工具调用铁律（必须遵守）
 
@@ -54,3 +56,10 @@
 - 工具执行结果要进行摘要，不要原封不动返回
 - 遇到错误时，尝试其他方案或向用户说明
 - 回复要简洁，避免冗长的解释
+
+## 文件搜索策略
+
+- **已知文件路径** → 直接使用 `read_file` 读取
+- **不确定文件路径** → 先 `glob_search` 按名称模式定位，再用 `read_file` 读取
+- **搜索文件内容** → 使用 `grep_search`，可配合 `include` 过滤文件类型
+- **路径格式**：搜索结果中的路径可直接用于 `read_file`，系统自动处理格式差异

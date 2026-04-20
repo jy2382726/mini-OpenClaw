@@ -1,16 +1,68 @@
-"""Agent 中间件集 — 渐进式工具输出压缩、运行时工具过滤。"""
+"""Agent 中间件集 — 渐进式工具输出压缩、运行时工具过滤、上下文感知摘要。"""
 
 from __future__ import annotations
 
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
+from langchain.agents.middleware import SummarizationMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import RemoveMessage, SystemMessage, ToolMessage
 from langgraph.config import get_config
 
 logger = logging.getLogger(__name__)
+
+# 内置中文摘要提示词（8 节结构）
+DEFAULT_SUMMARY_PROMPT_ZH = """<role>
+会话摘要助手
+</role>
+
+<primary_objective>
+你的唯一任务是从对话历史中提取最高质量、最相关的上下文信息。
+</primary_objective>
+
+<instructions>
+对话历史将被你提取的上下文信息替换。请确保提取的信息是对整体目标最重要的内容。
+请使用以下章节结构组织摘要，每个章节作为检查清单，有相关内容则填写，无则注明"无"：
+
+## 会话意图
+用户的主要目标或请求是什么？整体上要完成什么任务？简明扼要但足够理解整个会话的目的。
+
+## 关键决策
+记录对话中的重要选择、结论或策略。包括决策背后的推理。记录被否决的方案及其原因。
+
+## 工具调用
+记录已执行的工具调用及其结果摘要。包括终端命令、文件操作、API 调用等。
+
+## 文件产物
+创建、修改或访问了哪些文件？列出具体文件路径并简要描述每个文件的变更内容。
+
+## 错误修复
+遇到并解决了哪些错误或问题？记录错误原因和修复方法。
+
+## 用户消息
+用户在对话中传达的关键信息、偏好或反馈。
+
+## 当前进展
+当前任务完成到什么程度？哪些步骤已完成，哪些进行中？
+
+## 后续步骤
+还有哪些具体任务需要完成以实现会话意图？下一步应该做什么？
+
+</instructions>
+
+请仔细阅读完整对话历史，提取最重要和相关的上下文信息以替换对话历史。
+仅输出提取的上下文内容，不要包含任何额外信息或前后说明。
+
+<messages>
+待摘要的对话：
+{messages}
+</messages>"""
+
+# 压缩标记前缀 — 已处理的 ToolMessage 以此开头，跳过重复压缩
+_COMPRESSED_MARKER = "<!-- compressed:"
 
 # 各工具类型的 token 预算（1 token ≈ 4 字符）
 TOOL_OUTPUT_BUDGETS: dict[str, int] = {
@@ -19,11 +71,13 @@ TOOL_OUTPUT_BUDGETS: dict[str, int] = {
     "fetch_url": 3000,
     "read_file": 2000,
     "search_knowledge": 1000,
+    "glob_search": 1500,
+    "grep_search": 2500,
 }
 
 # 工具分类 tier — 供 ContextAwareToolFilter 使用
 TOOL_TIERS: dict[str, list[str]] = {
-    "always": ["read_file", "search_knowledge"],
+    "always": ["read_file", "search_knowledge", "glob_search", "grep_search"],
     "coding": ["terminal", "python_repl", "write_file"],
     "web": ["fetch_url"],
     "memory": ["save_memory", "search_memories"],
@@ -56,6 +110,17 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
         self._safe_ratio = safe_ratio
         self._pressure_ratio = pressure_ratio
         self._base_dir = Path(base_dir) if base_dir else Path("sessions")
+
+    @staticmethod
+    def _is_compressed(content: str) -> bool:
+        """检测 content 是否已被压缩处理。"""
+        return isinstance(content, str) and content.startswith(_COMPRESSED_MARKER)
+
+    @staticmethod
+    def _make_marker(method: str, original_length: int, archive_path: str | None) -> str:
+        """生成压缩标记头。"""
+        path = archive_path or "none"
+        return f"{_COMPRESSED_MARKER}{method}:{original_length}:{path} -->"
 
     def _estimate_tokens(self, messages: list) -> int:
         """粗略估算消息列表总 token 数（1 token ≈ 4 字符）。"""
@@ -97,31 +162,8 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
 
         return protected_ids
 
-    def _compress(self, content: str, budget: int, strategy: str) -> str:
-        """根据策略压缩内容。
-
-        - "truncate": 标准截断（头 2/3 + 尾 1/3）
-        - "aggressive": 短截断（头 1/2 + 尾 1/4）
-        """
-        char_budget = budget * 4
-
-        if strategy == "truncate":
-            head_len = char_budget * 2 // 3
-            tail_len = char_budget // 3
-        else:  # "aggressive"
-            head_len = char_budget // 2
-            tail_len = char_budget // 4
-
-        head = content[:head_len]
-        tail = content[-tail_len:] if tail_len > 0 else ""
-        omitted = len(content) - head_len - tail_len
-        return f"{head}\n...[省略约 {omitted} 字符]...\n{tail}"
-
-    def _archive_output(self, content: str, tool_name: str, session_id: str = "unknown") -> str:
-        """归档超大输出到文件，返回摘要 + 文件路径引用。
-
-        写入失败时降级为纯截断，不向上抛出异常。
-        """
+    def _archive_original(self, content: str, tool_name: str, session_id: str) -> str | None:
+        """将原始内容保存到归档文件，返回文件相对路径。写入失败返回 None。"""
         archive_dir = self._base_dir / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,22 +173,54 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
 
         try:
             filepath.write_text(content, encoding="utf-8")
+            return f"sessions/archive/{filename}"
         except (OSError, PermissionError, IOError):
-            logger.warning("归档写入失败 %s，降级为纯截断", filepath)
-            # 降级为纯截断
-            summary_budget = 500 * 4
-            if len(content) > summary_budget:
-                return content[: summary_budget * 2 // 3] + "\n...[已截断]..."
-            return content
+            logger.warning("归档写入失败 %s", filepath)
+            return None
 
-        # 生成截断摘要（约 500 token）
-        summary_budget = 500 * 4
-        if len(content) > summary_budget:
-            summary = content[: summary_budget * 2 // 3] + "\n...[已截断]..."
-        else:
-            summary = content
+    def _make_archived_content(
+        self, original: str, archive_path: str | None, strategy: str
+    ) -> str:
+        """生成 archived 策略的替换内容（用于超大输出）。"""
+        marker = self._make_marker("archived", len(original), archive_path)
+        head_budget = 500 * 4
+        tail_budget = 200 * 4
+        ref = (
+            f"[完整输出({len(original)}字符)已归档至 {archive_path}，可用 read_file 查看]"
+            if archive_path
+            else ""
+        )
 
-        return f"[完整输出已归档到 sessions/archive/{filename}，可用 read_file 查看]\n{summary}"
+        head = original[:head_budget]
+        tail = original[-tail_budget:] if tail_budget > 0 else ""
+        omitted = len(original) - head_budget - tail_budget
+
+        return f"{marker}\n{ref}\n{head}\n...[省略 {omitted} 字符]...\n{tail}"
+
+    def _make_truncated_content(
+        self, original: str, budget: int, strategy: str, archive_path: str | None
+    ) -> str:
+        """生成 truncated 策略的替换内容（用于中等输出）。"""
+        marker = self._make_marker("truncated", len(original), archive_path)
+        char_budget = budget * 4
+        ref = (
+            f"[原始输出({len(original)}字符)已归档至 {archive_path}]"
+            if archive_path
+            else ""
+        )
+
+        if strategy == "truncate":
+            head_len = char_budget * 2 // 3
+            tail_len = char_budget // 3
+        else:  # aggressive
+            head_len = char_budget // 2
+            tail_len = char_budget // 4
+
+        head = original[:head_len]
+        tail = original[-tail_len:] if tail_len > 0 else ""
+        omitted = len(original) - head_len - tail_len
+
+        return f"{marker}\n{ref}\n{head}\n...[省略 {omitted} 字符]...\n{tail}"
 
     async def abefore_model(self, state, runtime):
         messages = state.get("messages", [])
@@ -190,20 +264,43 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
             ):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
 
-                # Level 3: 归档超大输出（优先于普通截断）
+                # Step 1: 幂等检测 — 已处理过的消息直接跳过
+                if self._is_compressed(content):
+                    processed.append(msg)
+                    continue
+
+                # Step 2: 预算检测 — 未超预算的不处理
+                if not _exceeds_budget(content, self._budgets[msg.name]):
+                    processed.append(msg)
+                    continue
+
+                # Step 3: 保全原始数据 — 先归档，再压缩
+                archive_path = self._archive_original(content, msg.name, session_id)
+
+                # Step 4: 选择压缩策略
                 if len(content) > archive_threshold * 4:
-                    archived = self._archive_output(content, msg.name, session_id)
-                    msg = msg.model_copy(update={"content": archived})
-                    changed = True
-                # Level 1/2: 按策略截断
-                elif _exceeds_budget(content, self._budgets[msg.name]):
-                    compressed = self._compress(content, self._budgets[msg.name], strategy)
-                    msg = msg.model_copy(update={"content": compressed})
-                    changed = True
+                    new_content = self._make_archived_content(content, archive_path, strategy)
+                else:
+                    new_content = self._make_truncated_content(
+                        content, self._budgets[msg.name], strategy, archive_path
+                    )
+
+                msg = msg.model_copy(update={"content": new_content})
+                changed = True
 
             processed.append(msg)
 
         if changed:
+            compressed_count = sum(
+                1 for m in processed
+                if isinstance(m, ToolMessage) and self._is_compressed(
+                    m.content if isinstance(m.content, str) else str(m.content)
+                )
+            )
+            logger.info(
+                "工具输出压缩: %d 条消息已处理, 策略=%s, 保护=%d组",
+                compressed_count, strategy, protect_recent,
+            )
             return {"messages": processed}
         return None
 
@@ -211,17 +308,6 @@ class ToolOutputBudgetMiddleware(AgentMiddleware):
 def _exceeds_budget(content: str, budget: int) -> bool:
     """检查内容是否超过 token 预算（1 token ≈ 4 字符）。"""
     return len(content) > budget * 4
-
-
-def _truncate_with_summary(content: str, budget: int) -> str:
-    """截断内容：保留头 2/3 + 尾 1/3，中间插入省略标注。"""
-    char_budget = budget * 4
-    head_len = char_budget * 2 // 3
-    tail_len = char_budget // 3
-    head = content[:head_len]
-    tail = content[-tail_len:]
-    omitted = len(content) - char_budget
-    return f"{head}\n...[省略约 {omitted} 字符]...\n{tail}"
 
 
 class ContextAwareToolFilter(AgentMiddleware):
@@ -294,7 +380,10 @@ class ContextAwareToolFilter(AgentMiddleware):
 
     @staticmethod
     def _has_coding_context(text: str) -> bool:
-        keywords = ["代码", "函数", "编辑文件", "终端", "运行", "python", "terminal", "code", "script", "exec"]
+        keywords = [
+            "代码", "函数", "编辑文件", "终端", "运行", "python", "terminal", "code", "script", "exec",
+            "搜索文件", "查找文件", "搜索代码", "查找代码", "glob", "grep", "find file", "search code",
+        ]
         return any(kw in text for kw in keywords)
 
     @staticmethod
@@ -311,3 +400,35 @@ class ContextAwareToolFilter(AgentMiddleware):
     def _has_admin_context(text: str) -> bool:
         keywords = ["技能管理", "skill", "创建技能", "benchmark", "评估技能"]
         return any(kw in text for kw in keywords)
+
+
+class ContextAwareSummarizationMiddleware(SummarizationMiddleware):
+    """摘要中间件子类：在摘要过程中保护 SystemMessage 不被压缩。
+
+    父类 abefore_model 返回格式：
+    [RemoveMessage(REMOVE_ALL_MESSAGES), HumanMessage(summary), ...preserved]
+    SystemMessage 在 insert_pos=2 处重新注入。
+    """
+
+    async def abefore_model(self, state: dict[str, Any], runtime: Any) -> dict[str, Any] | None:
+        messages = state["messages"]
+
+        # 提取所有 SystemMessage
+        system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
+        if not system_msgs:
+            return await super().abefore_model(state, runtime)
+
+        # 构造不含 SystemMessage 的过滤 state
+        filtered_state = {**state, "messages": [m for m in messages if not isinstance(m, SystemMessage)]}
+
+        # 调用父类摘要逻辑
+        result = await super().abefore_model(filtered_state, runtime)
+        if result is None:
+            return None
+
+        # 重新注入 SystemMessage（insert_pos=2：RemoveMessage[0] + summary[1] 之后）
+        new_messages = result["messages"]
+        insert_pos = 2
+        new_messages = new_messages[:insert_pos] + system_msgs + new_messages[insert_pos:]
+
+        return {"messages": new_messages}
