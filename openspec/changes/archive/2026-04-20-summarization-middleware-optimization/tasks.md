@@ -33,7 +33,7 @@
 
 - [x] 7.1 修改 `frontend/src/lib/api.ts` 的 `getSessionTokenCount` 返回类型，新增 `context_window` 和 `usage_ratio` 字段
 - [x] 7.2 在 `frontend/src/lib/store.tsx` 中新增 `contextUsage` 状态（`{ ratio, totalTokens, contextWindow } | null`），通过 `useEffect([sessionId, messages.length, isStreaming])` 触发 token API 调用，`isStreaming=true` 时跳过
-- [x] 7.3 修改 `frontend/src/components/chat/ChatInput.tsx` 压缩按钮：`ratio < 0.6` 显示"压缩"；`0.6-0.8` 显示"压缩 (N%)"橙色；`≥ 0.8` 显示"压缩 (N%)"红色
+- [x] 7.3 修改 `frontend/src/components/chat/ChatInput.tsx` 压缩按钮：始终显示"压缩 (N%)"（`contextUsage` 非 null 时）；`< 0.6` 灰色；`0.6-0.8` 橙色；`≥ 0.8` 红色
 - [x] 7.4 修改 `frontend/src/components/chat/ChatInput.tsx` 发送按钮：`contextUsage.ratio > 0.8` 时禁用，显示提示"上下文空间不足，请先压缩对话"
 
 ## 8. 验证

@@ -841,12 +841,17 @@ class TestMiddlewareConfigToggles:
             "summarization": {"enabled": False},
             "tool_filter": {"enabled": False},
             "tool_call_limit": {"enabled": False},
+            "memory_middleware": {"enabled": False},
         }
-        with patch("config.get_middleware_config", return_value=mock_cfg):
+        with patch("config.get_middleware_config", return_value=mock_cfg), \
+             patch("config.get_context_window", return_value=131072):
             mgr = AgentManager()
             mgr._base_dir = Path("/tmp")
             middleware = mgr._build_middleware()
-            assert middleware == []
+            # FilesystemFileSearchMiddleware 无 enabled 开关，始终注册
+            from langchain.agents.middleware import FilesystemFileSearchMiddleware
+            assert len(middleware) == 1
+            assert isinstance(middleware[0], FilesystemFileSearchMiddleware)
 
     def test_custom_budgets_from_config(self):
         """config 中的 budgets 覆盖默认值。"""

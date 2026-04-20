@@ -17,14 +17,14 @@
 - 新增自定义中文摘要提示词（8 节结构，覆盖工具调用、错误修复、文件变更等场景）
 - 提示词通过 Markdown 文件配置（`workspace/summary_prompt.md`），遵循 Markdown-as-config 模式
 - 后端 `/tokens/session/{id}` API 新增返回 `context_window` 和 `usage_ratio` 字段
-- 前端压缩按钮显示上下文使用率百分比
+- 前端压缩按钮始终显示上下文使用率百分比（有数据时）
 - 前端发送按钮在上下文使用率超过 80% 时禁用，强制用户先执行压缩
 
 ## Capabilities
 
 ### New Capabilities
 
-- `context-usage-indicator`：上下文使用率实时指示器 — 在压缩按钮上显示使用率百分比，超过 80% 禁用发送按钮强制压缩
+- `context-usage-indicator`：上下文使用率实时指示器 — 在压缩按钮上始终显示使用率百分比，超过 80% 禁用发送按钮强制压缩
 
 ### Modified Capabilities
 

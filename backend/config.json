@@ -59,6 +59,10 @@
         "terminal": 10,
         "python_repl": 5
       }
+    },
+    "memory_middleware": {
+      "enabled": true,
+      "injection_mode": "system_prompt"
     }
   },
   "features": {

@@ -163,7 +163,7 @@ export default function ChatInput() {
             title={messages.length < 4 ? "至少需要 4 条消息才能摘要" : "摘要早期消息，保留最近 10 条"}
           >
             <Archive className="w-3.5 h-3.5" />
-            {contextUsage && contextUsage.ratio >= 0.6
+            {contextUsage
               ? `压缩 (${Math.round(contextUsage.ratio * 100)}%)`
               : "压缩"}
           </button>

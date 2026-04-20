@@ -17,7 +17,7 @@
 - 通过 `ContextAwareSummarizationMiddleware` 子类保护 SystemMessage
 - 配置驱动所有阈值（trigger_ratio/trim_ratio），支持运行时调整
 - 自定义中文摘要提示词，遵循 Markdown-as-config 模式
-- 在前端压缩按钮上实时显示上下文使用率，超过 80% 禁用发送按钮强制压缩
+- 在前端压缩按钮上始终显示上下文使用率百分比，超过 80% 禁用发送按钮强制压缩
 
 **Non-Goals:**
 

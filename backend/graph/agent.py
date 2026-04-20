@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from config import load_config, get_mem0_config, get_features_config, get_hitl_config, create_auxiliary_llm
+from config import load_config, get_features_config, get_hitl_config, create_auxiliary_llm
 from graph.prompt_builder import build_stable_prefix, build_dynamic_prefix
 from graph.session_manager import session_manager
 from tools import get_all_tools
@@ -109,7 +109,7 @@ class AgentManager:
         self._refresh_llm_if_needed()
         assert self._llm is not None
 
-        # Zone 1+2 稳定前缀（Zone 3 动态记忆由 astream/ainvoke 注入）
+        # Zone 1+2 稳定前缀（Zone 3 动态内容由中间件 + astream/ainvoke 协作注入）
         from graph.skill_registry import SkillRegistry
         # 缓存 SkillRegistry 实例，避免每次请求重新扫描磁盘
         if self._skill_registry is None:
@@ -141,7 +141,7 @@ class AgentManager:
         return agent
 
     def _build_middleware(self) -> list:
-        """构建中间件链：截断 → 摘要 → 工具过滤 → 限流 → 文件搜索。
+        """构建中间件链：截断 → 摘要 → 工具过滤 → 限流 → 记忆 → 文件搜索。
 
         每层通过 config.json 的 middleware 配置段独立开关。
         所有阈值基于 context_window 比例计算，切换模型后自动适应。
@@ -218,7 +218,16 @@ class AgentManager:
                 ]
             middleware.extend(limit_items)
 
-        # 第 5 层：长期记忆管理（MemoryMiddleware，规划中）
+        # 第 5 层：长期记忆管理（MemoryMiddleware）
+        if mw_cfg.get("memory_middleware", {}).get("enabled", True):
+            from graph.memory_middleware import MemoryMiddleware
+            mem_cfg = mw_cfg.get("memory_middleware", {})
+            middleware.append(MemoryMiddleware(
+                base_dir=self._base_dir,
+                config=mem_cfg,
+                write_executor=self._write_executor,
+            ))
+
         # 第 6 层：文件搜索工具（glob_search + grep_search）
         middleware.append(FilesystemFileSearchMiddleware(
             root_path=str(self._base_dir),
@@ -439,7 +448,7 @@ class AgentManager:
             async for event in agent.astream(
                 stream_input,
                 config=thread_config,
-                stream_mode=["messages", "updates"],
+                stream_mode=["messages", "updates", "custom"],
             ):
                 if isinstance(event, tuple):
                     mode, data = event
@@ -486,6 +495,9 @@ class AgentManager:
                                                 "input": str(tc.get("args", ""))[:1000],
                                             }
 
+                elif mode == "custom":
+                    yield data
+
             # HITL interrupt 检测
             hitl_cfg = get_hitl_config()
             if hitl_cfg.get("enabled") and hitl_cfg.get("approval_required"):
@@ -523,7 +535,7 @@ class AgentManager:
         """Stream agent response with token-level and node-level events.
 
         Yields events:
-          {"type": "retrieval", "query": "...", "results": [...]}  (RAG mode only)
+          {"type": "retrieval", "query": "...", "results": [...]}  (MemoryMiddleware)
           {"type": "token", "content": "..."}
           {"type": "tool_start", "tool": "...", "input": "..."}
           {"type": "tool_end", "tool": "...", "output": "..."}
@@ -532,22 +544,8 @@ class AgentManager:
         # 确保 checkpointer 已初始化（懒加载）
         await self._ensure_checkpointer()
 
-        # 统一记忆检索：不再依赖 rag_mode 开关
-        # Phase 7 移除 MEMORY.md 全文注入后，非 RAG 模式也需要记忆检索
-        rag_context = ""
+        # 统一记忆检索：已迁移到 MemoryMiddleware.abefore_agent
         features = get_features_config()
-        if self._base_dir and features.get("unified_memory", True):
-            from graph.unified_memory import get_unified_retriever
-
-            retriever = get_unified_retriever(self._base_dir)
-            results = await retriever.retrieve_async(message)
-            if results:
-                yield {
-                    "type": "retrieval",
-                    "query": message,
-                    "results": results,
-                }
-                rag_context = retriever.format_for_injection(results)
 
         # 任务状态管理：恢复已有 TaskState 或创建新的
         task_state_dict: dict | None = None
@@ -616,9 +614,10 @@ class AgentManager:
         messages = [HumanMessage(content=message)]
 
         # Zone 3: 动态内容注入为 SystemMessage，位于当前用户消息之前
+        # 记忆上下文由 MemoryMiddleware 管理，此处仅注入 TaskState
         has_active_steps = _has_in_progress_steps(task_state_dict)
         dynamic_prefix = build_dynamic_prefix(
-            memory_context=rag_context,
+            memory_context="",
             task_state=task_state_md,
             has_active_steps=has_active_steps,
         )
@@ -646,14 +645,6 @@ class AgentManager:
                 # 写回 checkpoint 并推送最终状态
                 await self._write_task_state(agent, thread_config, task_state_dict)
                 yield {"type": "task_update", "task_state": task_state_dict}
-
-        # 智能截流：将对话追加到缓冲区，由缓冲区判断是否触发 mem0 写入
-        # 关键优化：mem0 的 add() 会调用 LLM 做事实提取（约 20-90 秒），
-        # 因此将实际的 mem0 写入放到后台线程，不阻塞 SSE 响应流。
-        if self._base_dir and full_response:
-            mem0_cfg = get_mem0_config()
-            if mem0_cfg.get("enabled") and mem0_cfg.get("auto_extract"):
-                self._schedule_mem0_write(message, full_response, mem0_cfg)
 
     async def resume_stream(
         self,
@@ -700,38 +691,6 @@ class AgentManager:
         async for event in self._stream_events(agent, thread_config, session_id, None):
             yield event
 
-    def _schedule_mem0_write(
-        self, user_message: str, assistant_message: str, mem0_cfg: dict
-    ) -> None:
-        """在后台线程中执行 mem0 缓冲写入，不阻塞聊天响应。"""
-        base_dir = self._base_dir
-        assert base_dir is not None
-
-        def _background_write() -> None:
-            try:
-                from graph.memory_buffer import get_memory_buffer
-                from graph.mem0_manager import get_mem0_manager
-
-                buffer = get_memory_buffer(base_dir)
-                buffer.add_turn(user_message, assistant_message, "default")
-
-                # 检查立即触发（显式指令/强烈纠正）
-                should_flush = buffer.check_immediate_trigger(user_message)
-                # 检查轮次/时间触发
-                if not should_flush:
-                    should_flush = buffer.should_flush()
-
-                if should_flush:
-                    turns = buffer.flush()
-                    if turns:
-                        mgr = get_mem0_manager(base_dir)
-                        mgr.batch_add(turns, user_id=mem0_cfg.get("user_id", "default"))
-                        print(f"🧠 mem0 后台写入完成（{len(turns)} 轮对话）")
-            except Exception as e:
-                print(f"⚠️ mem0 后台写入失败: {e}")
-
-        self._write_executor.submit(_background_write)
-
     async def ainvoke(self, message: str, session_id: str) -> str:
         """Non-streaming invocation (fallback)."""
         # 确保 checkpointer 已初始化（懒加载）
@@ -739,15 +698,7 @@ class AgentManager:
 
         features = get_features_config()
 
-        # 统一记忆检索（与 astream 保持一致）
-        rag_context = ""
-        if self._base_dir and features.get("unified_memory", True):
-            from graph.unified_memory import get_unified_retriever
-
-            retriever = get_unified_retriever(self._base_dir)
-            results = await retriever.retrieve_async(message)
-            if results:
-                rag_context = retriever.format_for_injection(results)
+        # 统一记忆检索：已迁移到 MemoryMiddleware.abefore_agent
 
         # 任务状态管理（与 astream 保持一致）
         task_state_dict: dict | None = None
@@ -797,9 +748,10 @@ class AgentManager:
         messages = [HumanMessage(content=message)]
 
         # Zone 3: 动态内容注入为 SystemMessage
+        # 记忆上下文由 MemoryMiddleware 管理，此处仅注入 TaskState
         has_active_steps = _has_in_progress_steps(task_state_dict)
         dynamic_prefix = build_dynamic_prefix(
-            memory_context=rag_context,
+            memory_context="",
             task_state=task_state_md,
             has_active_steps=has_active_steps,
         )

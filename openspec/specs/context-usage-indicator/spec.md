@@ -2,7 +2,7 @@
 
 定义上下文使用率实时指示器功能，在压缩按钮上显示使用率百分比，超过 80% 时禁用发送按钮强制用户先执行压缩。
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Token API 返回上下文使用率
 
@@ -59,25 +59,31 @@ API 调用失败时，`contextUsage` 状态 MUST 降级为 `null`，不影响其
 
 ### Requirement: 压缩按钮显示上下文使用率
 
-ChatInput 中的压缩按钮 SHALL 根据上下文使用率显示不同状态：
-- `contextUsage` 为 `null` 或 `ratio < 0.6`：显示 "压缩"
+ChatInput 中的压缩按钮 SHALL 始终显示上下文使用率百分比（当 `contextUsage` 非 `null` 时），并根据使用率级别显示不同颜色：
+- `contextUsage` 为 `null`：显示 "压缩"（无百分比）
+- `contextUsage` 非 `null` 且 `ratio < 0.6`：显示 "压缩 (N%)"，默认灰色
 - `0.6 ≤ ratio < 0.8`：显示 "压缩 (N%)"，文字变为橙色
 - `ratio ≥ 0.8`：显示 "压缩 (N%)"，文字变为红色
 
-#### Scenario: 低使用率不显示百分比
+#### Scenario: 有使用率时始终显示百分比
+
+- **WHEN** `contextUsage` 非 `null`（任意 ratio）
+- **THEN** 压缩按钮 MUST 显示 "压缩 (N%)" 格式，N 为百分比整数
+
+#### Scenario: 低使用率灰色百分比
 
 - **WHEN** `contextUsage.ratio < 0.6`
-- **THEN** 压缩按钮 MUST 显示 "压缩"，使用默认灰色样式
+- **THEN** 压缩按钮 MUST 显示 "压缩 (N%)"，使用默认灰色样式
 
-#### Scenario: 中等使用率显示橙色百分比
+#### Scenario: 中等使用率橙色百分比
 
 - **WHEN** `0.6 ≤ contextUsage.ratio < 0.8`
-- **THEN** 压缩按钮 MUST 显示 "压缩 (65%)" 样式，文字为橙色
+- **THEN** 压缩按钮 MUST 显示 "压缩 (N%)" 样式，文字为橙色
 
-#### Scenario: 高使用率显示红色百分比
+#### Scenario: 高使用率红色百分比
 
 - **WHEN** `contextUsage.ratio ≥ 0.8`
-- **THEN** 压缩按钮 MUST 显示 "压缩 (85%)" 样式，文字为红色
+- **THEN** 压缩按钮 MUST 显示 "压缩 (N%)" 样式，文字为红色
 
 ### Requirement: 发送按钮超限禁用
 

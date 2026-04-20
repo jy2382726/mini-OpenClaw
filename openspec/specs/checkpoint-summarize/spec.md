@@ -1,8 +1,8 @@
 ## Purpose
 
-定义 Checkpoint 级手动摘要 API，支持从 checkpoint 读取消息列表、对早期消息生成结构化摘要并写回 checkpoint，确保手动摘要与自动摘要使用相同的 Prompt 和策略。
+增量更新手动摘要规范，同步使用自定义中文提示词，保持手动/自动摘要格式一致。
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Checkpoint 级手动摘要 API
 
@@ -48,17 +48,6 @@
 - **WHEN** `create_auxiliary_llm()` 返回 None（无 API key 或配置无效）
 - **THEN** 系统 MUST 返回 HTTP 503，提示辅助模型不可用
 
-### Requirement: AI/Tool 消息配对保护
-
-手动摘要的切割点 MUST 保证 AIMessage（含 tool_calls）与其对应的 ToolMessage 不被分离。如果切割点落在 ToolMessage 上，MUST 向前移动到包含对应 tool_calls 的 AIMessage 之前，或将 ToolMessage 一起纳入摘要范围。
-
-`_protect_ai_tool_pairs()` 方法实现此逻辑。
-
-#### Scenario: 切割点落在 ToolMessage 上
-
-- **WHEN** 最近 10 条消息的边界恰好落在一条 ToolMessage 上
-- **THEN** 系统 MUST 调整切割点，确保该 ToolMessage 及其对应的 AIMessage（含 tool_calls）要么一起被保留，要么一起被摘要
-
 ### Requirement: 摘要 Prompt 与自动摘要一致
 
 手动摘要 MUST 使用 `_load_summary_prompt()` 加载的提示词（与自动摘要 `ContextAwareSummarizationMiddleware` 共享同一加载逻辑），确保手动和自动摘要的输出格式一致。
@@ -67,25 +56,3 @@
 
 - **WHEN** 手动摘要成功执行
 - **THEN** 摘要内容 MUST 使用自定义中文提示词定义的结构（会话意图、关键决策、工具调用、文件产物、错误修复、用户消息、当前进展、后续步骤）
-
-### Requirement: 并发安全锁
-
-系统 MUST 防止同一会话的并发摘要请求。使用 `dict[str, asyncio.Lock]` 按 session_id 粒度管理锁。
-
-当已有摘要请求正在执行时，后续请求 MUST 被拒绝。
-
-#### Scenario: 并发摘要请求被拒绝
-
-- **GIVEN** 该会话已有摘要请求正在执行
-- **WHEN** 用户快速连续两次点击压缩按钮，第二次请求到达
-- **THEN** 第二次请求 MUST 返回 HTTP 409（Conflict），提示摘要正在进行中
-
-### Requirement: AgentManager 摘要方法封装
-
-`AgentManager` SHALL 提供公开的 `async summarize_checkpoint(session_id, keep_count=10)` 方法，封装从 checkpoint 读取消息、生成摘要、写回 checkpoint 的完整流程。API 层 MUST 委托给此方法执行，不直接操作 checkpointer。
-
-#### Scenario: API 层委托摘要逻辑
-
-- **GIVEN** 系统正常运行，AgentManager 已初始化
-- **WHEN** `POST /api/sessions/{session_id}/summarize` 被调用
-- **THEN** 端点处理函数 MUST 调用 `agent_manager.summarize_checkpoint(session_id)` 执行摘要，不直接访问 checkpointer 或辅助 LLM

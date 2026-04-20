@@ -2,7 +2,7 @@
 
 定义通过 LangChain 内置 `FilesystemFileSearchMiddleware` 为 Agent 提供的文件搜索工具能力，包含 glob_search（按文件名模式搜索）和 grep_search（按内容正则搜索）两个工具。
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: glob_search 文件名模式搜索
 
