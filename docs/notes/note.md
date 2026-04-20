@@ -4,12 +4,6 @@
 ## 会话压缩逻辑
 1、当前系统会话的压缩过程中，是否存在对systemprompt的压缩问题？
 
-## State信息替换的逻辑
-State 信息替换过程是怎么操作的？手动实现还是使用LangGraph的replace_state方法？
-1、手动实现：需要在每个线程中手动调用replace_state方法，将新的state传递给线程。
-2、使用LangGraph的replace_state方法：需要在每个线程中手动调用replace_state方法，将新的state传递给线程。
-3、其他：其他方法，如使用LangGraph的replace_state方法，需要在每个线程中手动调用replace_state方法，将新的state传递给线程。
-
 ## glob grep工具
 1、当前系统是否存在glob grep工具？
 

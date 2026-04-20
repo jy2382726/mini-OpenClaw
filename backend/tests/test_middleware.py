@@ -16,8 +16,8 @@ from graph.middleware import (
     TOOL_TIERS,
     ContextAwareToolFilter,
     ToolOutputBudgetMiddleware,
+    _COMPRESSED_MARKER,
     _exceeds_budget,
-    _truncate_with_summary,
 )
 
 
@@ -136,7 +136,7 @@ class TestProgressiveCompression:
         msgs = result["messages"]
         # 最早组被截断
         assert msgs[2].id == "g4_earliest"
-        assert "省略约" in msgs[2].content
+        assert "省略" in msgs[2].content
         # 受保护的 3 组不变
         assert msgs[4].content == "OK"
         assert msgs[6].content == "OK"
@@ -172,7 +172,7 @@ class TestProgressiveCompression:
         early_msg = msgs[2]
         assert isinstance(early_msg, ToolMessage)
         assert early_msg.id == "early_id"
-        assert "省略约" in early_msg.content
+        assert "省略" in early_msg.content
 
         # 最新工具输出被保护（未压缩）
         latest_msg = msgs[4]
@@ -252,7 +252,7 @@ class TestCurrentTurnProtection:
 
         msgs = result["messages"]
         # 第 4 组（最早）被压缩
-        assert "省略约" in msgs[2].content
+        assert "省略" in msgs[2].content
         # 第 3、2、1 组被保护（即使超预算）
         assert msgs[4].content == over_budget  # g2
         assert msgs[6].content == over_budget  # g3
@@ -284,8 +284,8 @@ class TestCurrentTurnProtection:
         assert result is not None
 
         msgs = result["messages"]
-        assert "省略约" in msgs[2].content  # g1 被压缩
-        assert "省略约" in msgs[4].content  # g2 被压缩
+        assert "省略" in msgs[2].content  # g1 被压缩
+        assert "省略" in msgs[4].content  # g2 被压缩
         assert msgs[6].content == over_budget  # g3 受保护
 
     @pytest.mark.asyncio
@@ -370,7 +370,7 @@ class TestContextWindowRatio:
         result = await mw.abefore_model(state, MockRuntime())
         assert result is not None, "32K 窗口应触发压缩"
         # 32K 窗口下超预算内容必然触发归档（archive_threshold < budget）
-        assert "完整输出已归档到" in result["messages"][2].content
+        assert "已归档至" in result["messages"][2].content
 
     @pytest.mark.asyncio
     async def test_large_window_stays_safe(self):
@@ -466,7 +466,7 @@ class TestArchiving:
         assert isinstance(tool_msg, ToolMessage)
         assert tool_msg.id == "archive_me"
         # 内容应包含归档引用
-        assert "完整输出已归档到" in tool_msg.content
+        assert "已归档至" in tool_msg.content
         assert "sessions/archive/tool_terminal_" in tool_msg.content
         assert "可用 read_file 查看" in tool_msg.content
 
@@ -482,8 +482,8 @@ class TestArchiving:
         """归档优先于普通截断：内容同时超 budget 和超 archive_threshold 时触发归档。"""
         # context_window=10000, archive_threshold = 10000 * 0.05 * 4 = 2000 chars
         mw = _make_middleware(context_window=10000, base_dir=str(tmp_path))
-        # 内容 = 8000 chars > archive_threshold(2000) → 归档
-        huge_output = "A" * 8000  # ~2000 tokens
+        # 内容 = 8500 chars > budget(8000) 且 > archive_threshold(2000) → 归档
+        huge_output = "A" * 8500  # ~2125 tokens
 
         # padding + 2 组 ≈ 5000 + 2000 = 7000 > pressure=4500 → Level 2, protect 1
         padding = _padding_tokens(mw, 5000)
@@ -504,7 +504,7 @@ class TestArchiving:
 
         tool_msg = result["messages"][2]
         # 归档而非截断
-        assert "完整输出已归档到" in tool_msg.content
+        assert "已归档至" in tool_msg.content
 
     @pytest.mark.asyncio
     async def test_archive_file_content_recoverable(self, tmp_path):
@@ -561,38 +561,38 @@ class TestArchiving:
         assert result is not None
 
         tool_msg = result["messages"][2]
-        # 应该是截断而非归档
-        assert "完整输出已归档到" not in tool_msg.content
-        assert "省略约" in tool_msg.content
+        # 应该是截断（truncated 策略），非归档摘要（archived 策略）
+        assert _COMPRESSED_MARKER in tool_msg.content
+        assert "truncated" in tool_msg.content
+        assert "省略" in tool_msg.content
 
-        # 归档目录不存在（没有触发归档）
-        assert not (tmp_path / "archive").exists()
+        # 新流程中所有超预算内容都会先归档原始数据
+        archive_dir = tmp_path / "archive"
+        assert archive_dir.exists()
 
     @pytest.mark.asyncio
     async def test_archive_filename_contains_session_id(self, tmp_path):
         """归档文件名包含 session_id。"""
         mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
         huge_output = "H" * 15000
-        result = mw._archive_output(huge_output, "terminal", "sess-test123")
+        result = mw._archive_original(huge_output, "terminal", "sess-test123")
         assert "tool_terminal_sess-test123_" in result
 
         archive_files = list((tmp_path / "archive").glob("tool_terminal_sess-test123_*.txt"))
         assert len(archive_files) == 1
 
     @pytest.mark.asyncio
-    async def test_archive_write_failure_degrades_to_truncation(self, tmp_path):
-        """归档写入失败时降级为纯截断，不含归档路径。"""
+    async def test_archive_write_failure_returns_none(self, tmp_path):
+        """归档写入失败时返回 None，不抛出异常。"""
         from unittest.mock import patch
 
         mw = _make_middleware(context_window=50000, base_dir=str(tmp_path))
         huge_output = "H" * 15000
 
         with patch("pathlib.Path.write_text", side_effect=OSError("磁盘满")):
-            result = mw._archive_output(huge_output, "terminal", "sess-fail")
+            result = mw._archive_original(huge_output, "terminal", "sess-fail")
 
-        # 应为纯截断结果，不含归档路径
-        assert "完整输出已归档到" not in result
-        assert "已截断" in result
+        assert result is None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -614,20 +614,50 @@ class TestExceedsBudget:
         assert not _exceeds_budget(content, 100)  # 400 chars == 400 chars budget
 
 
-class TestTruncateWithSummary:
-    def test_head_tail_preserved(self):
+class TestTruncatedContent:
+    def setup_method(self):
+        self.mw = ToolOutputBudgetMiddleware(context_window=131072)
+
+    def test_truncated_has_marker(self):
+        budget = 100
+        content = "A" * 1000
+        result = self.mw._make_truncated_content(content, budget, "truncate", None)
+        assert result.startswith(_COMPRESSED_MARKER)
+        assert "truncated" in result
+
+    def test_truncated_head_tail_preserved(self):
         budget = 100  # char_budget = 400, head=266, tail=133
         content = "H" * 200 + "M" * 300 + "T" * 200  # 700 chars total
-        result = _truncate_with_summary(content, budget)
-        assert result.startswith("H" * 200)
-        assert result.endswith("T" * 133)
-        assert "省略约" in result
+        result = self.mw._make_truncated_content(content, budget, "truncate", None)
+        assert "H" * 200 in result
+        assert "T" * 133 in result
+        assert "省略" in result
 
-    def test_omitted_count_correct(self):
-        budget = 10  # char_budget = 40
+    def test_truncated_archive_ref(self):
+        budget = 10
         content = "A" * 100
-        result = _truncate_with_summary(content, budget)
-        assert "省略约 60 字符" in result
+        result = self.mw._make_truncated_content(
+            content, budget, "truncate", "sessions/archive/test.txt"
+        )
+        assert "sessions/archive/test.txt" in result
+        assert _COMPRESSED_MARKER in result
+
+    def test_archived_content_structure(self):
+        content = "X" * 50000
+        result = self.mw._make_archived_content(
+            content, "sessions/archive/big.txt", "truncate"
+        )
+        assert result.startswith(_COMPRESSED_MARKER)
+        assert "archived" in result
+        assert "sessions/archive/big.txt" in result
+        assert "省略" in result
+
+    def test_is_compressed_detects_marker(self):
+        content = "<!-- compressed:truncated:1000:none -->\nsome text"
+        assert ToolOutputBudgetMiddleware._is_compressed(content)
+
+    def test_is_compressed_normal_content(self):
+        assert not ToolOutputBudgetMiddleware._is_compressed("normal output")
 
 
 # ═══════════════════════════════════════════════════════════════

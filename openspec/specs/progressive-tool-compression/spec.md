@@ -1,6 +1,6 @@
 ## Purpose
 
-定义基于上下文窗口比例的工具输出压缩策略，包括安全水位和紧张水位的阈值设定、当前轮次工具输出保护、多级渐进式压缩策略、工具输出自动归档等功能。此中间件为四层中间件链的第一层（ToolOutputBudgetMiddleware）。
+定义基于上下文窗口比例的工具输出压缩策略，包括安全水位和紧张水位的阈值设定、当前轮次工具输出保护、多级渐进式压缩策略、压缩幂等检测、先归档后截断流程、压缩统计日志等功能。此中间件为中间件链的第一层（ToolOutputBudgetMiddleware）。
 
 ## Requirements
 
@@ -51,6 +51,71 @@
 - **WHEN** 上下文使用比例超过 pressure_ratio，Agent 刚执行完第 5 次工具调用
 - **THEN** 系统 MUST 仅保持第 5 次工具输出的完整性，第 1-4 次的超预算输出均被压缩
 
+### Requirement: 压缩幂等检测
+
+系统 SHALL 在 `ToolOutputBudgetMiddleware.abefore_model` 中对每条待处理的 `ToolMessage` 执行幂等检测。已被压缩处理的消息 MUST 永远跳过，不再进入压缩流程。
+
+检测方式：检查 `content` 是否以 `<!-- compressed:` 开头。是则跳过该消息。
+
+标记格式 MUST 为 `<!-- compressed:{method}:{original_length}:{archive_path} -->`，其中：
+- `method`：压缩方式（`archived` 或 `truncated`）
+- `original_length`：原始字符数（整数）
+- `archive_path`：归档文件相对路径，归档失败时为 `none`
+
+#### Scenario: 已处理消息被跳过
+
+- **WHEN** 一条 ToolMessage 的 content 以 `<!-- compressed:truncated:15000:sessions/archive/tool_terminal_xxx.txt -->` 开头
+- **THEN** 系统 MUST 跳过该消息，不执行任何压缩操作
+
+#### Scenario: 旧消息无标记时正常处理
+
+- **WHEN** 一条 ToolMessage 的 content 不以 `<!-- compressed:` 开头，且超过预算
+- **THEN** 系统 MUST 正常执行压缩流程，并在替换内容中嵌入标记
+
+#### Scenario: 标记检测不影响未超预算消息
+
+- **WHEN** 一条 ToolMessage 的 content 以 `<!-- compressed:` 开头，但未超过预算
+- **THEN** 系统 MUST 仍然跳过该消息（标记已表明被处理过）
+
+### Requirement: 先归档后截断
+
+系统 SHALL 在截断任何工具输出之前，先将原始内容保存到归档文件。此流程 MUST 适用于所有超预算内容（不限于超大输出）。
+
+新增 `_archive_original()` 方法，负责将原始 content 写入归档文件。写入成功时返回归档文件相对路径，写入失败时返回 `None`。
+
+截断流程中，归档 MUST 在内容替换之前执行。归档失败时系统 MUST 降级为仅加标记的轻截断（标记中 `archive_path` 为 `none`），MUST NOT 向上抛出异常。
+
+#### Scenario: 中等输出先归档再截断
+
+- **WHEN** 一条 terminal 输出为 12000 字符（预算 8000），未达 `ARCHIVE_RATIO`
+- **THEN** 系统 MUST 先将原始 12000 字符保存到归档文件，再执行截断替换
+
+#### Scenario: 归档失败时安全降级
+
+- **WHEN** 归档文件写入失败（磁盘满、权限不足）
+- **THEN** 系统 MUST 仍执行截断替换，标记中 `archive_path` 字段为 `none`，MUST NOT 向上抛出异常
+
+#### Scenario: 归档文件可被 Agent 重新读取
+
+- **WHEN** Agent 需要查看已归档的原始输出
+- **THEN** Agent MUST 能通过 `read_file` 工具读取归档文件中的完整原始内容
+
+### Requirement: 压缩处理统计日志
+
+系统 SHALL 在 `abefore_model` 执行压缩后记录统计日志，包含已处理消息数、压缩策略和保护组数。
+
+日志级别 MUST 为 `info`，格式为 `"工具输出压缩: {count} 条消息已处理, 策略={strategy}, 保护={protect_recent}组"`。
+
+#### Scenario: 执行压缩后记录日志
+
+- **WHEN** `abefore_model` 完成至少一条消息的压缩处理
+- **THEN** 系统 MUST 记录 info 级别日志，包含处理数量、策略和保护范围
+
+#### Scenario: 未执行压缩时不记录
+
+- **WHEN** `abefore_model` 未压缩任何消息（`changed = False`）
+- **THEN** 系统 MUST NOT 记录压缩统计日志
+
 ### Requirement: 渐进式压缩策略
 
 系统 MUST 支持多级压缩策略，根据上下文压力递进执行：
@@ -61,47 +126,29 @@
 | 1 | safe_ratio ~ pressure_ratio | 头尾截断（头 2/3 + 尾 1/3） |
 | 2 | ≥ pressure_ratio | 短截断（头 1/2 + 尾 1/4） |
 
-压缩 MUST 保留工具名称和截断标注，格式为 `{head}\n...[省略约 N 字符]...\n{tail}`。
+压缩输出 MUST 包含三个部分：
+1. 压缩标记头（`<!-- compressed: -->`）
+2. 归档引用说明（如有归档路径）
+3. 结构化头尾摘要（头部 + 精确省略量 + 尾部）
+
+超大输出（> `ARCHIVE_RATIO`）MUST 使用 `_make_archived_content()` 方法，生成约 500 token 头部 + 200 token 尾部的结构化摘要。
+
+中等输出（> budget 但 ≤ `ARCHIVE_RATIO`）MUST 使用 `_make_truncated_content()` 方法，按策略分配头尾预算。
 
 #### Scenario: 安全水位使用标准截断
 
 - **WHEN** 上下文使用比例为 30%，一条早期 terminal 输出为 12000 字符（预算 8000）
-- **THEN** 系统截断为前 5333 字符 + 尾 2666 字符，中间插入省略标注
+- **THEN** 系统截断为标记头 + 归档引用 + 前 5333 字符 + 精确省略量 + 尾 2666 字符
 
 #### Scenario: 紧张水位使用短截断
 
 - **WHEN** 上下文使用比例为 50%，一条早期 terminal 输出为 12000 字符（预算 8000）
-- **THEN** 系统截断为前 4000 字符 + 尾 2000 字符，中间插入省略标注
+- **THEN** 系统截断为标记头 + 归档引用 + 前 4000 字符 + 精确省略量 + 尾 2000 字符
 
-### Requirement: 工具输出自动归档
+#### Scenario: 超大输出使用归档摘要
 
-当单条工具输出超过上下文窗口的 5%（`ARCHIVE_RATIO = 0.05`）时，系统 SHALL 将完整输出归档到文件，ToolMessage 中仅保留截断摘要和文件路径引用。
-
-归档文件 MUST 保存到 `sessions/archive/` 目录，文件名格式为 `tool_{tool_name}_{session_id}_{timestamp}.txt`，其中 `session_id` 通过 `get_config()` 从 LangGraph 上下文变量获取 `configurable.thread_id`。不在 graph 上下文中时 fallback 为 `"unknown"`。
-
-`_archive_output()` 方法 MUST 包裹 try/except：写入成功时返回路径引用 + 截断摘要；写入失败（磁盘满、权限不足等）时 MUST log.warning 并返回纯截断结果（不包含归档路径），MUST NOT 向上抛出异常。
-
-归档操作在截断之前检查（先归档再截断）。
-
-#### Scenario: 超大输出自动归档
-
-- **WHEN** 一条 terminal 输出超过上下文窗口的 5%，且 session_id 为 "sess-abc123"
-- **THEN** 系统将完整输出保存到 `sessions/archive/tool_terminal_sess-abc123_1713000000.txt`，ToolMessage content 替换为 `[完整输出已归档到 sessions/archive/tool_terminal_sess-abc123_1713000000.txt，可用 read_file 查看]\n{截断摘要}`
-
-#### Scenario: 归档文件可被 Agent 重新读取
-
-- **WHEN** Agent 需要查看已归档的完整输出
-- **THEN** Agent MUST 能通过 `read_file("sessions/archive/tool_terminal_sess-abc123_1713000000.txt")` 读取完整内容
-
-#### Scenario: 归档写入失败时安全降级
-
-- **WHEN** `sessions/archive/` 目录不可写（权限不足、磁盘满）
-- **THEN** 系统 MUST 仅执行截断压缩，不归档完整输出，MUST 在日志中记录 warning 级别警告，MUST NOT 向上抛出异常
-
-#### Scenario: session_id 获取
-
-- **WHEN** `abefore_model` 被调用
-- **THEN** 系统 MUST 通过 `get_config()` 从 LangGraph 上下文变量获取 `configurable.thread_id` 作为 session_id，传递给 `_archive_output()`。获取失败时 fallback 为 `"unknown"`
+- **WHEN** 一条 terminal 输出超过上下文窗口的 5%
+- **THEN** 系统生成标记头（method=archived）+ 归档引用说明 + 头部（~500 token）+ 精确省略量 + 尾部（~200 token）
 
 ### Requirement: 上下文窗口大小配置
 
